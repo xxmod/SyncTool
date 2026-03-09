@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili/Emby 视频同步（房间面板）
 // @namespace    synctool
-// @version      1.0.0
+// @version      0.0.1
 // @description  在 B 站与 Emby 中按房间同步视频进度与播放状态。
 // @author       xxmod
 // @match        https://www.bilibili.com/*
@@ -47,7 +47,6 @@
     rooms: [],
     currentRoom: CONFIG.roomId,
     manualClose: false,
-    localBuffering: false,
     ui: {
       panel: null,
       mini: null,
@@ -102,23 +101,6 @@
 
   function leaveRoom() {
     send({ type: 'leave_room', at: nowMs() });
-  }
-
-  function reportBuffering(isBuffering, reason) {
-    if (!state.connected || !state.currentRoom) {
-      return;
-    }
-    if (state.localBuffering === isBuffering) {
-      return;
-    }
-    state.localBuffering = isBuffering;
-    send({
-      type: 'buffer_status',
-      room: state.currentRoom,
-      buffering: isBuffering,
-      reason: reason || '',
-      at: nowMs(),
-    });
   }
 
   function sendSyncState(silent, action, effect) {
@@ -226,24 +208,6 @@
     setStatus(`用户 ${msg.from || '其他用户'} 已离线，已自动暂停`, '#f59e0b');
   }
 
-  function applyRoomPlaybackCtl(msg) {
-    const v = getVideoElement();
-    if (!v) {
-      return;
-    }
-    state.suppressUntil = nowMs() + 600;
-    if (msg.paused) {
-      v.pause();
-      setStatus('房间检测到卡顿，已自动暂停', '#f59e0b');
-      return;
-    }
-    const p = v.play();
-    if (p && typeof p.catch === 'function') {
-      p.catch(() => {});
-    }
-    setStatus('房间卡顿已恢复，继续播放', '#22c55e');
-  }
-
   function sameRoom(msg) {
     return !!state.currentRoom && msg.room === state.currentRoom;
   }
@@ -280,14 +244,6 @@
       return;
     }
 
-    if (msg.type === 'room_playback_ctl') {
-      if (!sameRoom(msg)) {
-        return;
-      }
-      applyRoomPlaybackCtl(msg);
-      return;
-    }
-
     if (msg.type === 'list_rooms') {
       if (Array.isArray(msg.rooms)) {
         state.rooms = msg.rooms.slice();
@@ -311,10 +267,8 @@
       renderCurrentRoom();
       if (state.currentRoom) {
         setStatus(`已加入 ${state.currentRoom}`, '#22c55e');
-        reportBuffering(false, 'join_room');
       } else {
         setStatus('已离开房间', '#f59e0b');
-        state.localBuffering = false;
       }
       return;
     }
@@ -416,8 +370,6 @@
     let lastTime = 0;
     let lastPaused = null;
     let lastRate = 1;
-    let lastAdvanceAt = nowMs();
-    let lastObservedTime = 0;
 
     const maybeSend = (silent, action, effect) => {
       if (!state.connected || !state.currentRoom) {
@@ -430,7 +382,6 @@
     };
 
     const tryHook = () => {
-      const now = nowMs();
       const v = getVideoElement();
       if (!v) {
         return;
@@ -441,24 +392,12 @@
         lastTime = Number(v.currentTime || 0);
         lastPaused = !!v.paused;
         lastRate = Number(v.playbackRate || 1);
-        lastObservedTime = lastTime;
-        lastAdvanceAt = now;
 
         v.addEventListener('seeking', () => maybeSend(true, 'seek', 'remote_seek'));
         v.addEventListener('seeked', () => maybeSend(true, 'seek', 'remote_seek'));
         v.addEventListener('pause', () => maybeSend(true, 'pause', 'remote_pause'));
         v.addEventListener('play', () => maybeSend(true, 'play', 'remote_play'));
         v.addEventListener('ratechange', () => maybeSend(true, 'ratechange', 'remote_ratechange'));
-        v.addEventListener('waiting', () => reportBuffering(true, 'waiting'));
-        v.addEventListener('stalled', () => reportBuffering(true, 'stalled'));
-        v.addEventListener('emptied', () => reportBuffering(true, 'emptied'));
-        v.addEventListener('playing', () => reportBuffering(false, 'playing'));
-        v.addEventListener('canplay', () => reportBuffering(false, 'canplay'));
-        v.addEventListener('canplaythrough', () => reportBuffering(false, 'canplaythrough'));
-        v.addEventListener('timeupdate', () => {
-          lastAdvanceAt = nowMs();
-          reportBuffering(false, 'timeupdate');
-        });
         log('video hooks installed');
       }
 
@@ -479,17 +418,7 @@
         maybeSend(true, 'ratechange', 'remote_ratechange');
       }
 
-      const advanced = curTime > lastObservedTime+0.04;
-      if (advanced) {
-        lastAdvanceAt = now;
-      }
-
-      const stalledByClock = !curPaused && !v.ended && (now - lastAdvanceAt) > 1400;
-      const stalledByReadyState = !curPaused && !v.ended && v.readyState < 3;
-      reportBuffering(stalledByClock || stalledByReadyState, stalledByClock ? 'stall_clock' : 'poll');
-
       lastTime = curTime;
-      lastObservedTime = curTime;
       lastPaused = curPaused;
       lastRate = curRate;
     };

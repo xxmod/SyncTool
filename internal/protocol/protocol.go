@@ -16,8 +16,6 @@ const (
 	TypeLeave   = "leave_room"
 	TypeJoined  = "room_joined"
 	TypeError   = "error"
-	TypeBuffer  = "buffer_status"
-	TypeRoomCtl = "room_playback_ctl"
 )
 
 type Message struct {
@@ -32,8 +30,6 @@ type Message struct {
 	CurrentTime float64  `json:"currentTime,omitempty"`
 	Paused      bool     `json:"paused,omitempty"`
 	Rate        float64  `json:"rate,omitempty"`
-	Buffering   bool     `json:"buffering,omitempty"`
-	Reason      string   `json:"reason,omitempty"`
 	Error       string   `json:"error,omitempty"`
 	At          int64    `json:"at,omitempty"`
 }
