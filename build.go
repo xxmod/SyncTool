@@ -27,6 +27,7 @@ func main() {
 	envMap := loadDotEnv(".env")
 	defaultPort := firstNonEmpty(envMap["DEFAULT_SERVER_PORT"], "9000")
 	defaultAddr := firstNonEmpty(envMap["DEFAULT_SERVER_ADDR"], "ws://127.0.0.1:9000/ws")
+	defaultRoomCount := firstNonEmpty(envMap["DEFAULT_SERVER_ROOM_COUNT"], "3")
 
 	if err := os.MkdirAll("bin", 0o755); err != nil {
 		fatalf("create bin dir failed: %v", err)
@@ -56,7 +57,12 @@ func main() {
 		clientPath := filepath.Join("bin", clientName)
 
 		fmt.Printf("Building %s/%s server -> %s\n", t.goos, t.goarch, serverPath)
-		err := goBuild(t, serverPath, "./cmd/server", "-X main.buildDefaultServerPort="+defaultPort)
+		err := goBuild(
+			t,
+			serverPath,
+			"./cmd/server",
+			"-X main.buildDefaultServerPort="+defaultPort+" -X main.buildDefaultRoomCount="+defaultRoomCount,
+		)
 		if err != nil {
 			fatalf("build server for %s/%s failed: %v", t.goos, t.goarch, err)
 		}
@@ -69,7 +75,7 @@ func main() {
 	}
 
 	fmt.Println("Build finished.")
-	fmt.Printf("Injected defaults: DEFAULT_SERVER_PORT=%s, DEFAULT_SERVER_ADDR=%s\n", defaultPort, defaultAddr)
+	fmt.Printf("Injected defaults: DEFAULT_SERVER_PORT=%s, DEFAULT_SERVER_ADDR=%s, DEFAULT_SERVER_ROOM_COUNT=%s\n", defaultPort, defaultAddr, defaultRoomCount)
 }
 
 func goBuild(t target, outPath, pkg, ldflags string) error {

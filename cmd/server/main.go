@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,10 +17,12 @@ import (
 )
 
 var buildDefaultServerPort string
+var buildDefaultRoomCount string
 
 type client struct {
 	id   string
 	name string
+	room string
 	conn *websocket.Conn
 	wmu  sync.Mutex
 }
@@ -27,10 +30,11 @@ type client struct {
 type hub struct {
 	mu      sync.RWMutex
 	clients map[string]*client
+	rooms   []string
 }
 
-func newHub() *hub {
-	return &hub{clients: make(map[string]*client)}
+func newHub(rooms []string) *hub {
+	return &hub{clients: make(map[string]*client), rooms: rooms}
 }
 
 func (h *hub) add(c *client) {
@@ -45,17 +49,50 @@ func (h *hub) remove(id string) {
 	delete(h.clients, id)
 }
 
-func (h *hub) broadcastExclude(senderID string, msg protocol.Message) {
+func (h *hub) broadcastExcludeInRoom(senderID, room string, msg protocol.Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for id, c := range h.clients {
 		if id == senderID {
 			continue
 		}
+		if c.room != room {
+			continue
+		}
 		if err := sendMessage(c, msg); err != nil {
 			log.Printf("broadcast to %s failed: %v", id, err)
 		}
 	}
+}
+
+func (h *hub) isValidRoom(room string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, r := range h.rooms {
+		if r == room {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *hub) roomList() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]string, len(h.rooms))
+	copy(out, h.rooms)
+	return out
+}
+
+func (h *hub) changeRoom(id, room string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.clients[id]
+	if !ok {
+		return false
+	}
+	c.room = room
+	return true
 }
 
 func sendMessage(c *client, msg protocol.Message) error {
@@ -78,9 +115,13 @@ func nextClientID() string {
 func main() {
 	listenAddr := flag.String("listen", defaultListenAddr(), "server listen address")
 	wsPath := flag.String("ws-path", "/ws", "websocket endpoint path")
+	roomCount := flag.Int("room-count", defaultRoomCount(), "room count, generated as room-1..room-N")
 	flag.Parse()
+	if *roomCount < 1 {
+		log.Fatalf("room-count must be >= 1")
+	}
 
-	h := newHub()
+	h := newHub(makeRooms(*roomCount))
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
@@ -98,10 +139,18 @@ func main() {
 		_, _ = w.Write([]byte("synctool server ok\n"))
 	})
 
-	log.Printf("server listening at %s, ws endpoint %s", *listenAddr, *wsPath)
+	log.Printf("server listening at %s, ws endpoint %s, rooms=%d", *listenAddr, *wsPath, *roomCount)
 	if err := http.ListenAndServe(*listenAddr, mux); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+func makeRooms(count int) []string {
+	rooms := make([]string, 0, count)
+	for i := 1; i <= count; i++ {
+		rooms = append(rooms, fmt.Sprintf("room-%d", i))
+	}
+	return rooms
 }
 
 func defaultListenAddr() string {
@@ -115,6 +164,18 @@ func defaultListenAddr() string {
 	return ":" + port
 }
 
+func defaultRoomCount() int {
+	v := strings.TrimSpace(buildDefaultRoomCount)
+	if v == "" {
+		return 3
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 3
+	}
+	return n
+}
+
 func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -123,15 +184,18 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 	}
 
 	id := nextClientID()
-	c := &client{id: id, conn: conn, name: id}
+	defaultRoom := h.roomList()[0]
+	c := &client{id: id, conn: conn, name: id, room: defaultRoom}
 	h.add(c)
 	log.Printf("client connected: %s (%s)", c.id, r.RemoteAddr)
 
 	defer func() {
+		leftRoom := c.room
 		h.remove(c.id)
-		h.broadcastExclude(c.id, protocol.Message{
+		h.broadcastExcludeInRoom(c.id, leftRoom, protocol.Message{
 			Type: protocol.TypeOffline,
 			From: c.name,
+			Room: leftRoom,
 			At:   time.Now().UnixMilli(),
 		})
 		_ = conn.Close()
@@ -156,19 +220,45 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 				c.name = msg.Name
 			}
 			log.Printf("hello: %s as %s", c.id, c.name)
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeList, Rooms: h.roomList(), Room: c.room, At: time.Now().UnixMilli()})
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: c.room, Rooms: h.roomList(), At: time.Now().UnixMilli()})
+
+		case protocol.TypeList:
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeList, Rooms: h.roomList(), Room: c.room, At: time.Now().UnixMilli()})
+
+		case protocol.TypeJoin:
+			if !h.isValidRoom(msg.Room) {
+				_ = sendMessage(c, protocol.Message{Type: protocol.TypeError, Error: "invalid room", Rooms: h.roomList(), Room: c.room, At: time.Now().UnixMilli()})
+				continue
+			}
+			h.changeRoom(c.id, msg.Room)
+			log.Printf("client %s joined %s", c.id, c.room)
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: c.room, Rooms: h.roomList(), At: time.Now().UnixMilli()})
+
+		case protocol.TypeLeave:
+			h.changeRoom(c.id, "")
+			log.Printf("client %s left room", c.id)
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: "", Rooms: h.roomList(), At: time.Now().UnixMilli()})
 
 		case protocol.TypeSpace:
-			trigger := protocol.Message{Type: protocol.TypeTrigger, From: c.name, At: time.Now().UnixMilli()}
-			log.Printf("space event from %s (%s)", c.id, c.name)
-			h.broadcastExclude(c.id, trigger)
+			if c.room == "" {
+				continue
+			}
+			trigger := protocol.Message{Type: protocol.TypeTrigger, From: c.name, Room: c.room, At: time.Now().UnixMilli()}
+			log.Printf("space event from %s (%s) room=%s", c.id, c.name, c.room)
+			h.broadcastExcludeInRoom(c.id, c.room, trigger)
 
 		case protocol.TypeSync:
+			if c.room == "" {
+				continue
+			}
 			msg.From = c.name
+			msg.Room = c.room
 			if msg.At == 0 {
 				msg.At = time.Now().UnixMilli()
 			}
 			log.Printf("sync_state from %s (%s), room=%s, t=%.3f, paused=%t", c.id, c.name, msg.Room, msg.CurrentTime, msg.Paused)
-			h.broadcastExclude(c.id, msg)
+			h.broadcastExcludeInRoom(c.id, c.room, msg)
 
 		default:
 			log.Printf("unknown message type from %s: %s", c.id, msg.Type)

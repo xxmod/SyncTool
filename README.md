@@ -32,6 +32,7 @@ go run ./cmd/server -listen :9000
 
 - `-listen`：监听地址，默认 `:9000`
 - `-ws-path`：WebSocket 路径，默认 `/ws`
+- `-room-count`：房间数量，默认读取构建注入值（形如 `room-1 ... room-N`）
 
 ## 启动客户端
 
@@ -50,12 +51,14 @@ go run ./cmd/client -server ws://127.0.0.1:9000/ws
 
 - `DEFAULT_SERVER_PORT`：服务端默认监听端口（例如 `9000`）
 - `DEFAULT_SERVER_ADDR`：客户端默认连接地址（例如 `ws://192.168.1.49:9000/ws` 或 `wss://your-domain/ws`）
+- `DEFAULT_SERVER_ROOM_COUNT`：服务端默认房间数（例如 `3`）
 
 示例：
 
 ```env
 DEFAULT_SERVER_PORT=9000
 DEFAULT_SERVER_ADDR=ws://192.168.1.49:9000/ws
+DEFAULT_SERVER_ROOM_COUNT=3
 ```
 
 构建：
@@ -110,7 +113,7 @@ go run .\build.go
 
 ## 油猴脚本（Bilibili / Emby）
 
-已提供脚本：`scripts/bilibili-emby-sync.user.js`
+已提供脚本：`scripts/sync.user.js`
 
 用途：
 
@@ -121,8 +124,15 @@ go run .\build.go
 安装：
 
 1. 安装 Tampermonkey。
-2. 新建脚本并粘贴 `scripts/bilibili-emby-sync.user.js` 内容。
-3. 打开 B 站或 Emby 播放页，按 `F12` 在控制台配置：
+2. 新建脚本并粘贴 `scripts/sync.user.js` 内容。
+3. 打开 B 站或 Emby 播放页，右上角会出现控制窗口：
+
+- 可填写服务器地址并重连
+- 可拉取房间列表
+- 可选择房间并 `Join/Leave`
+- 可手动 `Hide` 窗口（全屏时自动隐藏）
+
+4. 也可以在控制台配置：
 
 ```javascript
 window.synctool.setServer('ws://你的服务端:9000/ws')
@@ -130,7 +140,7 @@ window.synctool.setRoom('room-1')
 window.synctool.setName('user-a')
 ```
 
-4. 刷新页面生效。
+5. 刷新页面生效。
 
 操作：
 
@@ -145,4 +155,5 @@ window.synctool.setName('user-a')
 说明：
 
 - 服务端会将 `sync_state` 广播给其他在线客户端。
-- 客户端按 `room` 过滤消息，不同房间互不影响。
+- 房间内同步，跨房间互不影响。
+- 支持 `list_rooms` / `join_room` / `leave_room`，可自由进出房间。
