@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SyncTool 油猴脚本安装</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: #111b2f;
+      --text: #e5edf8;
+      --muted: #9ab0cf;
+      --line: #2b3a57;
+      --btn: #1d4ed8;
+      --btn-hover: #1e40af;
+    }
+    html, body {
+      margin: 0;
+      background: radial-gradient(circle at 20% 10%, #1b2a47 0%, var(--bg) 45%);
+      color: var(--text);
+      font: 16px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      min-height: 100%;
+    }
+    .wrap {
+      max-width: 760px;
+      margin: 48px auto;
+      padding: 0 16px;
+    }
+    .card {
+      background: color-mix(in oklab, var(--card), black 12%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 26px;
+    }
+    p {
+      margin: 0 0 14px;
+      color: var(--muted);
+    }
+    .btn {
+      display: inline-block;
+      text-decoration: none;
+      color: #fff;
+      background: var(--btn);
+      border: 1px solid #3b82f6;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 600;
+    }
+    .btn:hover {
+      background: var(--btn-hover);
+    }
+    code {
+      background: #0a1426;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 6px;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="card">
+      <h1>SyncTool 油猴脚本</h1>
+      <p>安装 Tampermonkey 后，点击下面按钮即可直接安装脚本（类似油叉一键安装）。</p>
+      <p>
+        <a class="btn" href="./sync.user.js">一键安装 sync.user.js</a>
+      </p>
+      <p>安装地址: <code>https://&lt;你的用户名&gt;.github.io/&lt;仓库名&gt;/sync.user.js</code></p>
+      <p>如果浏览器只是打开文本没有安装弹窗，请确认 Tampermonkey 已启用并允许此站点安装。</p>
+    </section>
+  </main>
+</body>
+</html>

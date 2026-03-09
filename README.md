@@ -157,3 +157,25 @@ window.synctool.setName('user-a')
 - 服务端会将 `sync_state` 广播给其他在线客户端。
 - 房间内同步，跨房间互不影响。
 - 支持 `list_rooms` / `join_room` / `leave_room`，可自由进出房间。
+
+## GitHub 一键安装油猴脚本
+
+仓库已提供工作流：`.github/workflows/userscript-pages.yml`
+
+作用：
+
+- 当你 push 到 `main/master` 后，自动把 `scripts/sync.user.js` 发布到 GitHub Pages。
+- 自动生成安装页（`pages/index.html`）。
+
+你需要做一次设置：
+
+1. 打开 GitHub 仓库 `Settings`。
+2. 进入 `Pages`。
+3. `Source` 选择 `GitHub Actions`。
+
+发布后可用地址：
+
+- 安装页：`https://<你的用户名>.github.io/<仓库名>/`
+- 直接安装链接：`https://<你的用户名>.github.io/<仓库名>/sync.user.js`
+
+在安装页点击“一键安装 sync.user.js”即可像油叉那样直接安装。
