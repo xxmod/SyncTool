@@ -23,18 +23,26 @@ type client struct {
 	id   string
 	name string
 	room string
+	buff bool
 	conn *websocket.Conn
 	wmu  sync.Mutex
 }
 
 type hub struct {
-	mu      sync.RWMutex
-	clients map[string]*client
-	rooms   []string
+	mu                sync.RWMutex
+	clients           map[string]*client
+	rooms             []string
+	roomDesiredPlay   map[string]bool
+	roomPausedByStall map[string]bool
 }
 
 func newHub(rooms []string) *hub {
-	return &hub{clients: make(map[string]*client), rooms: rooms}
+	return &hub{
+		clients:           make(map[string]*client),
+		rooms:             rooms,
+		roomDesiredPlay:   make(map[string]bool),
+		roomPausedByStall: make(map[string]bool),
+	}
 }
 
 func (h *hub) add(c *client) {
@@ -49,6 +57,18 @@ func (h *hub) remove(id string) {
 	delete(h.clients, id)
 }
 
+func (h *hub) removeAndGetRoom(id string) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.clients[id]
+	if !ok {
+		return ""
+	}
+	room := c.room
+	delete(h.clients, id)
+	return room
+}
+
 func (h *hub) broadcastExcludeInRoom(senderID, room string, msg protocol.Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -61,6 +81,19 @@ func (h *hub) broadcastExcludeInRoom(senderID, room string, msg protocol.Message
 		}
 		if err := sendMessage(c, msg); err != nil {
 			log.Printf("broadcast to %s failed: %v", id, err)
+		}
+	}
+}
+
+func (h *hub) broadcastInRoom(room string, msg protocol.Message) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, c := range h.clients {
+		if c.room != room {
+			continue
+		}
+		if err := sendMessage(c, msg); err != nil {
+			log.Printf("broadcast to %s failed: %v", c.id, err)
 		}
 	}
 }
@@ -92,7 +125,99 @@ func (h *hub) changeRoom(id, room string) bool {
 		return false
 	}
 	c.room = room
+	c.buff = false
 	return true
+}
+
+func (h *hub) getClientRoom(id string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	c, ok := h.clients[id]
+	if !ok {
+		return ""
+	}
+	return c.room
+}
+
+func (h *hub) setRoomDesiredPlaying(room string, playing bool) {
+	if room == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.roomDesiredPlay[room] = playing
+}
+
+func (h *hub) setClientBuffering(id string, buffering bool) (string, bool, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c, ok := h.clients[id]
+	if !ok {
+		return "", false, false
+	}
+	c.buff = buffering
+	room := c.room
+	if room == "" {
+		return "", false, false
+	}
+
+	anyBuffering := false
+	for _, x := range h.clients {
+		if x.room == room && x.buff {
+			anyBuffering = true
+			break
+		}
+	}
+	desiredPlay := h.roomDesiredPlay[room]
+	pausedByStall := h.roomPausedByStall[room]
+
+	sendPause := false
+	sendResume := false
+	if anyBuffering {
+		if desiredPlay && !pausedByStall {
+			h.roomPausedByStall[room] = true
+			sendPause = true
+		}
+	} else {
+		if pausedByStall && desiredPlay {
+			sendResume = true
+		}
+		h.roomPausedByStall[room] = false
+	}
+
+	return room, sendPause, sendResume
+}
+
+func (h *hub) reevaluateRoom(room string) (bool, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if room == "" {
+		return false, false
+	}
+	anyBuffering := false
+	for _, x := range h.clients {
+		if x.room == room && x.buff {
+			anyBuffering = true
+			break
+		}
+	}
+	desiredPlay := h.roomDesiredPlay[room]
+	pausedByStall := h.roomPausedByStall[room]
+	sendPause := false
+	sendResume := false
+
+	if anyBuffering {
+		if desiredPlay && !pausedByStall {
+			h.roomPausedByStall[room] = true
+			sendPause = true
+		}
+	} else {
+		if pausedByStall && desiredPlay {
+			sendResume = true
+		}
+		h.roomPausedByStall[room] = false
+	}
+	return sendPause, sendResume
 }
 
 func sendMessage(c *client, msg protocol.Message) error {
@@ -191,13 +316,20 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 
 	defer func() {
 		leftRoom := c.room
-		h.remove(c.id)
+		h.removeAndGetRoom(c.id)
 		h.broadcastExcludeInRoom(c.id, leftRoom, protocol.Message{
 			Type: protocol.TypeOffline,
 			From: c.name,
 			Room: leftRoom,
 			At:   time.Now().UnixMilli(),
 		})
+		pause, resume := h.reevaluateRoom(leftRoom)
+		if pause {
+			h.broadcastInRoom(leftRoom, protocol.Message{Type: protocol.TypeRoomCtl, Room: leftRoom, Paused: true, Reason: "buffering", At: time.Now().UnixMilli()})
+		}
+		if resume {
+			h.broadcastInRoom(leftRoom, protocol.Message{Type: protocol.TypeRoomCtl, Room: leftRoom, Paused: false, Reason: "buffering_cleared", At: time.Now().UnixMilli()})
+		}
 		_ = conn.Close()
 		log.Printf("client disconnected: %s", c.id)
 	}()
@@ -231,14 +363,36 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 				_ = sendMessage(c, protocol.Message{Type: protocol.TypeError, Error: "invalid room", Rooms: h.roomList(), Room: c.room, At: time.Now().UnixMilli()})
 				continue
 			}
+			oldRoom := h.getClientRoom(c.id)
 			h.changeRoom(c.id, msg.Room)
+			c.room = msg.Room
 			log.Printf("client %s joined %s", c.id, c.room)
 			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: c.room, Rooms: h.roomList(), At: time.Now().UnixMilli()})
+			if oldRoom != "" && oldRoom != c.room {
+				pause, resume := h.reevaluateRoom(oldRoom)
+				if pause {
+					h.broadcastInRoom(oldRoom, protocol.Message{Type: protocol.TypeRoomCtl, Room: oldRoom, Paused: true, Reason: "buffering", At: time.Now().UnixMilli()})
+				}
+				if resume {
+					h.broadcastInRoom(oldRoom, protocol.Message{Type: protocol.TypeRoomCtl, Room: oldRoom, Paused: false, Reason: "buffering_cleared", At: time.Now().UnixMilli()})
+				}
+			}
 
 		case protocol.TypeLeave:
+			oldRoom := h.getClientRoom(c.id)
 			h.changeRoom(c.id, "")
+			c.room = ""
 			log.Printf("client %s left room", c.id)
 			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: "", Rooms: h.roomList(), At: time.Now().UnixMilli()})
+			if oldRoom != "" {
+				pause, resume := h.reevaluateRoom(oldRoom)
+				if pause {
+					h.broadcastInRoom(oldRoom, protocol.Message{Type: protocol.TypeRoomCtl, Room: oldRoom, Paused: true, Reason: "buffering", At: time.Now().UnixMilli()})
+				}
+				if resume {
+					h.broadcastInRoom(oldRoom, protocol.Message{Type: protocol.TypeRoomCtl, Room: oldRoom, Paused: false, Reason: "buffering_cleared", At: time.Now().UnixMilli()})
+				}
+			}
 
 		case protocol.TypeSpace:
 			if c.room == "" {
@@ -252,6 +406,7 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			if c.room == "" {
 				continue
 			}
+			h.setRoomDesiredPlaying(c.room, !msg.Paused)
 			msg.From = c.name
 			msg.Room = c.room
 			if msg.At == 0 {
@@ -259,6 +414,19 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			}
 			log.Printf("sync_state from %s (%s), room=%s, t=%.3f, paused=%t", c.id, c.name, msg.Room, msg.CurrentTime, msg.Paused)
 			h.broadcastExcludeInRoom(c.id, c.room, msg)
+
+		case protocol.TypeBuffer:
+			if c.room == "" {
+				continue
+			}
+			room, sendPause, sendResume := h.setClientBuffering(c.id, msg.Buffering)
+			log.Printf("buffer_status from %s (%s) room=%s buffering=%t", c.id, c.name, room, msg.Buffering)
+			if sendPause {
+				h.broadcastInRoom(room, protocol.Message{Type: protocol.TypeRoomCtl, Room: room, Paused: true, Reason: "buffering", At: time.Now().UnixMilli()})
+			}
+			if sendResume {
+				h.broadcastInRoom(room, protocol.Message{Type: protocol.TypeRoomCtl, Room: room, Paused: false, Reason: "buffering_cleared", At: time.Now().UnixMilli()})
+			}
 
 		default:
 			log.Printf("unknown message type from %s: %s", c.id, msg.Type)

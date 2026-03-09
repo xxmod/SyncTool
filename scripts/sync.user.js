@@ -46,6 +46,7 @@
     rooms: [],
     currentRoom: CONFIG.roomId,
     manualClose: false,
+    localBuffering: false,
     ui: {
       panel: null,
       mini: null,
@@ -99,6 +100,23 @@
 
   function leaveRoom() {
     send({ type: 'leave_room', at: nowMs() });
+  }
+
+  function reportBuffering(isBuffering, reason) {
+    if (!state.connected || !state.currentRoom) {
+      return;
+    }
+    if (state.localBuffering === isBuffering) {
+      return;
+    }
+    state.localBuffering = isBuffering;
+    send({
+      type: 'buffer_status',
+      room: state.currentRoom,
+      buffering: isBuffering,
+      reason: reason || '',
+      at: nowMs(),
+    });
   }
 
   function sendSyncState(silent) {
@@ -168,6 +186,24 @@
     setStatus(`用户 ${msg.from || '其他用户'} 已离线，已自动暂停`, '#f59e0b');
   }
 
+  function applyRoomPlaybackCtl(msg) {
+    const v = getVideoElement();
+    if (!v) {
+      return;
+    }
+    state.suppressUntil = nowMs() + 600;
+    if (msg.paused) {
+      v.pause();
+      setStatus('房间检测到卡顿，已自动暂停', '#f59e0b');
+      return;
+    }
+    const p = v.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => {});
+    }
+    setStatus('房间卡顿已恢复，继续播放', '#22c55e');
+  }
+
   function sameRoom(msg) {
     return !!state.currentRoom && msg.room === state.currentRoom;
   }
@@ -203,6 +239,14 @@
       return;
     }
 
+    if (msg.type === 'room_playback_ctl') {
+      if (!sameRoom(msg)) {
+        return;
+      }
+      applyRoomPlaybackCtl(msg);
+      return;
+    }
+
     if (msg.type === 'list_rooms') {
       if (Array.isArray(msg.rooms)) {
         state.rooms = msg.rooms.slice();
@@ -226,8 +270,10 @@
       renderCurrentRoom();
       if (state.currentRoom) {
         setStatus(`已加入 ${state.currentRoom}`, '#22c55e');
+        reportBuffering(false, 'join_room');
       } else {
         setStatus('已离开房间', '#f59e0b');
+        state.localBuffering = false;
       }
       return;
     }
@@ -340,6 +386,11 @@
         v.addEventListener('pause', onEvent);
         v.addEventListener('play', onEvent);
         v.addEventListener('ratechange', onEvent);
+        v.addEventListener('waiting', () => reportBuffering(true, 'waiting'));
+        v.addEventListener('stalled', () => reportBuffering(true, 'stalled'));
+        v.addEventListener('playing', () => reportBuffering(false, 'playing'));
+        v.addEventListener('canplay', () => reportBuffering(false, 'canplay'));
+        v.addEventListener('canplaythrough', () => reportBuffering(false, 'canplaythrough'));
         log('video hooks installed');
       }
 
@@ -355,6 +406,9 @@
       if (timeJump || pausedChanged || rateChanged) {
         maybeSend(true);
       }
+
+      const bufferingNow = !curPaused && v.readyState < 3;
+      reportBuffering(bufferingNow, 'poll');
 
       lastTime = curTime;
       lastPaused = curPaused;
