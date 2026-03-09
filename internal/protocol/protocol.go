@@ -24,6 +24,8 @@ type Message struct {
 	Type        string   `json:"type"`
 	Name        string   `json:"name,omitempty"`
 	From        string   `json:"from,omitempty"`
+	Action      string   `json:"action,omitempty"`
+	Effect      string   `json:"effect,omitempty"`
 	Room        string   `json:"room,omitempty"`
 	Rooms       []string `json:"rooms,omitempty"`
 	URL         string   `json:"url,omitempty"`

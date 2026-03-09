@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bilibili/Emby 视频同步（房间面板）
 // @namespace    synctool
-// @version      0.2.0
+// @version      1.0.0
 // @description  在 B 站与 Emby 中按房间同步视频进度与播放状态。
 // @author       xxmod
 // @match        https://www.bilibili.com/*
@@ -41,6 +41,7 @@
 
   const state = {
     ws: null,
+    wsSession: 0,
     connected: false,
     suppressUntil: 0,
     rooms: [],
@@ -51,6 +52,7 @@
       panel: null,
       mini: null,
       status: null,
+      notice: null,
       roomSelect: null,
       roomText: null,
       wsInput: null,
@@ -119,7 +121,7 @@
     });
   }
 
-  function sendSyncState(silent) {
+  function sendSyncState(silent, action, effect) {
     if (!state.currentRoom) {
       if (!silent) {
         setStatus('未选择房间', '#f59e0b');
@@ -136,6 +138,8 @@
     send({
       type: 'sync_state',
       from: CONFIG.clientName,
+      action: action || 'sync',
+      effect: effect || '',
       room: state.currentRoom,
       currentTime: v.currentTime,
       paused: v.paused,
@@ -146,6 +150,42 @@
     if (!silent) {
       setStatus(`已同步到 ${state.currentRoom}`, '#10b981');
     }
+  }
+
+  function showNotice(text, color) {
+    const box = state.ui.notice;
+    if (!box) {
+      return;
+    }
+    box.textContent = text;
+    box.style.borderColor = color || '#22c55e';
+    box.style.color = '#f8fafc';
+    box.style.opacity = '1';
+    box.style.transform = 'translateY(0)';
+
+    if (showNotice._timer) {
+      clearTimeout(showNotice._timer);
+    }
+    showNotice._timer = setTimeout(() => {
+      box.style.opacity = '0';
+      box.style.transform = 'translateY(-6px)';
+    }, 2600);
+  }
+
+  function actionLabel(action) {
+    if (action === 'play') return '开始播放';
+    if (action === 'pause') return '暂停了播放';
+    if (action === 'seek') return '拖动了进度条';
+    if (action === 'ratechange') return '修改了播放速度';
+    return '发起了同步';
+  }
+
+  function effectLabel(msg) {
+    if (msg.action === 'play') return '导致本端继续播放';
+    if (msg.action === 'pause') return '导致本端已暂停';
+    if (msg.action === 'seek') return `导致本端跳转到 ${Number(msg.currentTime || 0).toFixed(1)}s`;
+    if (msg.action === 'ratechange') return `导致本端速度变为 ${Number(msg.rate || 1).toFixed(2)}x`;
+    return '导致本端状态已更新';
   }
 
   function applySyncState(msg) {
@@ -228,6 +268,7 @@
       }
       applySyncState(msg);
       setStatus(`已应用来自 ${msg.from || '其他用户'} 的同步`, '#22c55e');
+      showNotice(`${msg.from || '其他用户'}${actionLabel(msg.action)}，${effectLabel(msg)}`, '#22c55e');
       return;
     }
 
@@ -285,7 +326,6 @@
 
   function connectWS(forceReconnect) {
     if (forceReconnect && state.ws) {
-      state.manualClose = true;
       try {
         state.ws.close();
       } catch {
@@ -307,9 +347,17 @@
     }
 
     state.ws = ws;
+    const session = ++state.wsSession;
     state.manualClose = false;
 
     ws.onopen = () => {
+      if (session !== state.wsSession) {
+        try {
+          ws.close();
+        } catch {
+        }
+        return;
+      }
       state.connected = true;
       setStatus('已连接', '#22c55e');
       sendHello();
@@ -320,9 +368,17 @@
       log('ws connected', CONFIG.wsURL, CONFIG.clientName);
     };
 
-    ws.onmessage = onMessage;
+    ws.onmessage = (evt) => {
+      if (session !== state.wsSession) {
+        return;
+      }
+      onMessage(evt);
+    };
 
     ws.onclose = () => {
+      if (session !== state.wsSession) {
+        return;
+      }
       state.connected = false;
       renderStatus();
       if (!state.manualClose) {
@@ -332,6 +388,9 @@
     };
 
     ws.onerror = () => {
+      if (session !== state.wsSession) {
+        return;
+      }
       state.connected = false;
       renderStatus();
     };
@@ -357,18 +416,21 @@
     let lastTime = 0;
     let lastPaused = null;
     let lastRate = 1;
+    let lastAdvanceAt = nowMs();
+    let lastObservedTime = 0;
 
-    const maybeSend = (silent) => {
+    const maybeSend = (silent, action, effect) => {
       if (!state.connected || !state.currentRoom) {
         return;
       }
       if (nowMs() < state.suppressUntil) {
         return;
       }
-      sendSyncState(!!silent);
+      sendSyncState(!!silent, action, effect);
     };
 
     const tryHook = () => {
+      const now = nowMs();
       const v = getVideoElement();
       if (!v) {
         return;
@@ -379,18 +441,24 @@
         lastTime = Number(v.currentTime || 0);
         lastPaused = !!v.paused;
         lastRate = Number(v.playbackRate || 1);
+        lastObservedTime = lastTime;
+        lastAdvanceAt = now;
 
-        const onEvent = () => maybeSend(true);
-        v.addEventListener('seeking', onEvent);
-        v.addEventListener('seeked', onEvent);
-        v.addEventListener('pause', onEvent);
-        v.addEventListener('play', onEvent);
-        v.addEventListener('ratechange', onEvent);
+        v.addEventListener('seeking', () => maybeSend(true, 'seek', 'remote_seek'));
+        v.addEventListener('seeked', () => maybeSend(true, 'seek', 'remote_seek'));
+        v.addEventListener('pause', () => maybeSend(true, 'pause', 'remote_pause'));
+        v.addEventListener('play', () => maybeSend(true, 'play', 'remote_play'));
+        v.addEventListener('ratechange', () => maybeSend(true, 'ratechange', 'remote_ratechange'));
         v.addEventListener('waiting', () => reportBuffering(true, 'waiting'));
         v.addEventListener('stalled', () => reportBuffering(true, 'stalled'));
+        v.addEventListener('emptied', () => reportBuffering(true, 'emptied'));
         v.addEventListener('playing', () => reportBuffering(false, 'playing'));
         v.addEventListener('canplay', () => reportBuffering(false, 'canplay'));
         v.addEventListener('canplaythrough', () => reportBuffering(false, 'canplaythrough'));
+        v.addEventListener('timeupdate', () => {
+          lastAdvanceAt = nowMs();
+          reportBuffering(false, 'timeupdate');
+        });
         log('video hooks installed');
       }
 
@@ -403,14 +471,25 @@
       const pausedChanged = lastPaused !== null && curPaused !== lastPaused;
       const rateChanged = Math.abs(curRate - lastRate) > 0.01;
 
-      if (timeJump || pausedChanged || rateChanged) {
-        maybeSend(true);
+      if (timeJump) {
+        maybeSend(true, 'seek', 'remote_seek');
+      } else if (pausedChanged) {
+        maybeSend(true, curPaused ? 'pause' : 'play', curPaused ? 'remote_pause' : 'remote_play');
+      } else if (rateChanged) {
+        maybeSend(true, 'ratechange', 'remote_ratechange');
       }
 
-      const bufferingNow = !curPaused && v.readyState < 3;
-      reportBuffering(bufferingNow, 'poll');
+      const advanced = curTime > lastObservedTime+0.04;
+      if (advanced) {
+        lastAdvanceAt = now;
+      }
+
+      const stalledByClock = !curPaused && !v.ended && (now - lastAdvanceAt) > 1400;
+      const stalledByReadyState = !curPaused && !v.ended && v.readyState < 3;
+      reportBuffering(stalledByClock || stalledByReadyState, stalledByClock ? 'stall_clock' : 'poll');
 
       lastTime = curTime;
+      lastObservedTime = curTime;
       lastPaused = curPaused;
       lastRate = curRate;
     };
@@ -510,6 +589,27 @@
   }
 
   function buildUI() {
+        const notice = document.createElement('div');
+        notice.id = 'synctool-notice';
+        notice.style.cssText = [
+          'position:fixed',
+          'top:12px',
+          'left:12px',
+          'z-index:1000000',
+          'max-width:360px',
+          'padding:8px 10px',
+          'border:1px solid #22c55e',
+          'border-radius:8px',
+          'background:rgba(2,6,23,.92)',
+          'color:#f8fafc',
+          'font:12px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif',
+          'box-shadow:0 8px 24px rgba(0,0,0,.35)',
+          'opacity:0',
+          'transform:translateY(-6px)',
+          'transition:opacity .2s ease,transform .2s ease',
+          'pointer-events:none',
+        ].join(';');
+
     const panel = document.createElement('div');
     panel.id = 'synctool-panel';
     panel.style.cssText = [
@@ -631,10 +731,12 @@
 
     document.body.appendChild(panel);
     document.body.appendChild(mini);
+    document.body.appendChild(notice);
 
     state.ui.panel = panel;
     state.ui.mini = mini;
     state.ui.status = status;
+    state.ui.notice = notice;
     state.ui.roomSelect = roomSelect;
     state.ui.roomText = current;
     state.ui.wsInput = wsInput;

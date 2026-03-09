@@ -71,7 +71,7 @@ func (h *hub) removeAndGetRoom(id string) string {
 
 func (h *hub) broadcastExcludeInRoom(senderID, room string, msg protocol.Message) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	targets := make([]*client, 0, len(h.clients))
 	for id, c := range h.clients {
 		if id == senderID {
 			continue
@@ -79,19 +79,29 @@ func (h *hub) broadcastExcludeInRoom(senderID, room string, msg protocol.Message
 		if c.room != room {
 			continue
 		}
+		targets = append(targets, c)
+	}
+	h.mu.RUnlock()
+
+	for _, c := range targets {
 		if err := sendMessage(c, msg); err != nil {
-			log.Printf("broadcast to %s failed: %v", id, err)
+			log.Printf("broadcast to %s failed: %v", c.id, err)
 		}
 	}
 }
 
 func (h *hub) broadcastInRoom(room string, msg protocol.Message) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	targets := make([]*client, 0, len(h.clients))
 	for _, c := range h.clients {
 		if c.room != room {
 			continue
 		}
+		targets = append(targets, c)
+	}
+	h.mu.RUnlock()
+
+	for _, c := range targets {
 		if err := sendMessage(c, msg); err != nil {
 			log.Printf("broadcast to %s failed: %v", c.id, err)
 		}
@@ -315,8 +325,7 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 	log.Printf("client connected: %s (%s)", c.id, r.RemoteAddr)
 
 	defer func() {
-		leftRoom := c.room
-		h.removeAndGetRoom(c.id)
+		leftRoom := h.removeAndGetRoom(c.id)
 		h.broadcastExcludeInRoom(c.id, leftRoom, protocol.Message{
 			Type: protocol.TypeOffline,
 			From: c.name,
@@ -351,12 +360,14 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			if msg.Name != "" {
 				c.name = msg.Name
 			}
+			room := h.getClientRoom(c.id)
 			log.Printf("hello: %s as %s", c.id, c.name)
-			_ = sendMessage(c, protocol.Message{Type: protocol.TypeList, Rooms: h.roomList(), Room: c.room, At: time.Now().UnixMilli()})
-			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: c.room, Rooms: h.roomList(), At: time.Now().UnixMilli()})
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeList, Rooms: h.roomList(), Room: room, At: time.Now().UnixMilli()})
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: room, Rooms: h.roomList(), At: time.Now().UnixMilli()})
 
 		case protocol.TypeList:
-			_ = sendMessage(c, protocol.Message{Type: protocol.TypeList, Rooms: h.roomList(), Room: c.room, At: time.Now().UnixMilli()})
+			room := h.getClientRoom(c.id)
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeList, Rooms: h.roomList(), Room: room, At: time.Now().UnixMilli()})
 
 		case protocol.TypeJoin:
 			if !h.isValidRoom(msg.Room) {
@@ -365,10 +376,10 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			}
 			oldRoom := h.getClientRoom(c.id)
 			h.changeRoom(c.id, msg.Room)
-			c.room = msg.Room
-			log.Printf("client %s joined %s", c.id, c.room)
-			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: c.room, Rooms: h.roomList(), At: time.Now().UnixMilli()})
-			if oldRoom != "" && oldRoom != c.room {
+			joinedRoom := h.getClientRoom(c.id)
+			log.Printf("client %s joined %s", c.id, joinedRoom)
+			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: joinedRoom, Rooms: h.roomList(), At: time.Now().UnixMilli()})
+			if oldRoom != "" && oldRoom != joinedRoom {
 				pause, resume := h.reevaluateRoom(oldRoom)
 				if pause {
 					h.broadcastInRoom(oldRoom, protocol.Message{Type: protocol.TypeRoomCtl, Room: oldRoom, Paused: true, Reason: "buffering", At: time.Now().UnixMilli()})
@@ -381,7 +392,6 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 		case protocol.TypeLeave:
 			oldRoom := h.getClientRoom(c.id)
 			h.changeRoom(c.id, "")
-			c.room = ""
 			log.Printf("client %s left room", c.id)
 			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: "", Rooms: h.roomList(), At: time.Now().UnixMilli()})
 			if oldRoom != "" {
@@ -395,28 +405,31 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			}
 
 		case protocol.TypeSpace:
-			if c.room == "" {
+			room := h.getClientRoom(c.id)
+			if room == "" {
 				continue
 			}
-			trigger := protocol.Message{Type: protocol.TypeTrigger, From: c.name, Room: c.room, At: time.Now().UnixMilli()}
-			log.Printf("space event from %s (%s) room=%s", c.id, c.name, c.room)
-			h.broadcastExcludeInRoom(c.id, c.room, trigger)
+			trigger := protocol.Message{Type: protocol.TypeTrigger, From: c.name, Room: room, At: time.Now().UnixMilli()}
+			log.Printf("space event from %s (%s) room=%s", c.id, c.name, room)
+			h.broadcastExcludeInRoom(c.id, room, trigger)
 
 		case protocol.TypeSync:
-			if c.room == "" {
+			room := h.getClientRoom(c.id)
+			if room == "" {
 				continue
 			}
-			h.setRoomDesiredPlaying(c.room, !msg.Paused)
+			h.setRoomDesiredPlaying(room, !msg.Paused)
 			msg.From = c.name
-			msg.Room = c.room
+			msg.Room = room
 			if msg.At == 0 {
 				msg.At = time.Now().UnixMilli()
 			}
 			log.Printf("sync_state from %s (%s), room=%s, t=%.3f, paused=%t", c.id, c.name, msg.Room, msg.CurrentTime, msg.Paused)
-			h.broadcastExcludeInRoom(c.id, c.room, msg)
+			h.broadcastExcludeInRoom(c.id, room, msg)
 
 		case protocol.TypeBuffer:
-			if c.room == "" {
+			room := h.getClientRoom(c.id)
+			if room == "" {
 				continue
 			}
 			room, sendPause, sendResume := h.setClientBuffering(c.id, msg.Buffering)
