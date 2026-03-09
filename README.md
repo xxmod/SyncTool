@@ -107,3 +107,42 @@ go run .\build.go
 
 - 客户端对“模拟产生的空格”有短暂抑制窗口，避免循环触发风暴。
 - 如果你要跨平台支持（Linux/macOS）全局按键与模拟，需要替换对应平台实现。
+
+## 油猴脚本（Bilibili / Emby）
+
+已提供脚本：`scripts/bilibili-emby-sync.user.js`
+
+用途：
+
+- 在浏览器内读取 `<video>` 的 `currentTime/paused/playbackRate`
+- 通过 WebSocket 上报到本项目服务端
+- 其他用户自动跳转到该进度并同步播放/暂停状态
+
+安装：
+
+1. 安装 Tampermonkey。
+2. 新建脚本并粘贴 `scripts/bilibili-emby-sync.user.js` 内容。
+3. 打开 B 站或 Emby 播放页，按 `F12` 在控制台配置：
+
+```javascript
+window.synctool.setServer('ws://你的服务端:9000/ws')
+window.synctool.setRoom('room-1')
+window.synctool.setName('user-a')
+```
+
+4. 刷新页面生效。
+
+操作：
+
+- 主控按键：`Ctrl+Shift+S` 发送当前进度状态
+- 也支持本地 `seek/pause/play/ratechange` 自动广播
+
+协议新增：
+
+- `type: "sync_state"`
+- 主要字段：`room/currentTime/paused/rate/url/from/at`
+
+说明：
+
+- 服务端会将 `sync_state` 广播给其他在线客户端。
+- 客户端按 `room` 过滤消息，不同房间互不影响。

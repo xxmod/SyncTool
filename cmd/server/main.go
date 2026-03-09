@@ -162,6 +162,14 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			log.Printf("space event from %s (%s)", c.id, c.name)
 			h.broadcastExclude(c.id, trigger)
 
+		case protocol.TypeSync:
+			msg.From = c.name
+			if msg.At == 0 {
+				msg.At = time.Now().UnixMilli()
+			}
+			log.Printf("sync_state from %s (%s), room=%s, t=%.3f, paused=%t", c.id, c.name, msg.Room, msg.CurrentTime, msg.Paused)
+			h.broadcastExclude(c.id, msg)
+
 		default:
 			log.Printf("unknown message type from %s: %s", c.id, msg.Type)
 		}

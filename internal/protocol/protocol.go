@@ -10,13 +10,19 @@ const (
 	TypeSpace   = "space"
 	TypeTrigger = "trigger"
 	TypeOffline = "offline"
+	TypeSync    = "sync_state"
 )
 
 type Message struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
-	From string `json:"from,omitempty"`
-	At   int64  `json:"at,omitempty"`
+	Type        string  `json:"type"`
+	Name        string  `json:"name,omitempty"`
+	From        string  `json:"from,omitempty"`
+	Room        string  `json:"room,omitempty"`
+	URL         string  `json:"url,omitempty"`
+	CurrentTime float64 `json:"currentTime,omitempty"`
+	Paused      bool    `json:"paused,omitempty"`
+	Rate        float64 `json:"rate,omitempty"`
+	At          int64   `json:"at,omitempty"`
 }
 
 func Encode(msg Message) ([]byte, error) {
