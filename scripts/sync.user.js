@@ -23,9 +23,9 @@
     hidden: 'synctool_panel_hidden',
   };
 
-  // First run defaults to hidden panel. User can reopen via mini button.
+  // First run defaults to expanded panel. Later runs keep persisted state.
   if (localStorage.getItem(STORE.hidden) === null) {
-    localStorage.setItem(STORE.hidden, '1');
+    localStorage.setItem(STORE.hidden, '0');
   }
 
   const CONFIG = {
@@ -158,6 +158,16 @@
     }
   }
 
+  function pauseForOffline(msg) {
+    const v = getVideoElement();
+    if (!v) {
+      return;
+    }
+    state.suppressUntil = nowMs() + 600;
+    v.pause();
+    setStatus(`用户 ${msg.from || '其他用户'} 已离线，已自动暂停`, '#f59e0b');
+  }
+
   function sameRoom(msg) {
     return !!state.currentRoom && msg.room === state.currentRoom;
   }
@@ -182,6 +192,14 @@
       }
       applySyncState(msg);
       setStatus(`已应用来自 ${msg.from || '其他用户'} 的同步`, '#22c55e');
+      return;
+    }
+
+    if (msg.type === 'offline') {
+      if (!sameRoom(msg)) {
+        return;
+      }
+      pauseForOffline(msg);
       return;
     }
 
@@ -535,20 +553,25 @@
 
     const mini = document.createElement('button');
     mini.type = 'button';
-    mini.textContent = '同步';
+    mini.textContent = '';
+    mini.title = '显示同步面板';
+    mini.setAttribute('aria-label', '显示同步面板');
     mini.style.cssText = [
       'position:fixed',
       'bottom:12px',
       'left:12px',
       'z-index:999999',
       'display:none',
-      'padding:6px 10px',
+      'width:10px',
+      'height:10px',
+      'padding:0',
       'border:1px solid #334155',
-      'border-radius:999px',
+      'border-radius:5px',
       'background:rgba(2,6,23,.92)',
       'color:#e2e8f0',
       'cursor:pointer',
-      'font:12px -apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif',
+      'line-height:10px',
+      'font-size:0',
     ].join(';');
     mini.addEventListener('click', showPanel);
 
