@@ -34,6 +34,8 @@
     clientName: localStorage.getItem(STORE.name) || `tm-${Math.random().toString(36).slice(2, 8)}`,
     hotkeySync: { ctrl: true, shift: true, key: 'S' },
     jumpToleranceSec: 0.35,
+    remoteSeekGuardMs: 2200,
+    seekCooldownMs: 450,
     reconnectMs: 2000,
   };
 
@@ -44,6 +46,7 @@
     wsSession: 0,
     connected: false,
     suppressUntil: 0,
+    remoteSeekGuardUntil: 0,
     rooms: [],
     currentRoom: CONFIG.roomId,
     manualClose: false,
@@ -176,14 +179,20 @@
       return;
     }
 
-    state.suppressUntil = nowMs() + 600;
+    const now = nowMs();
+    state.suppressUntil = now + 600;
 
     const targetTime = Number(msg.currentTime || 0);
     const targetRate = Number(msg.rate || 1);
     const shouldPause = Boolean(msg.paused);
 
-    if (Math.abs(v.currentTime - targetTime) > CONFIG.jumpToleranceSec) {
+    const needsJump = Math.abs(v.currentTime - targetTime) > CONFIG.jumpToleranceSec;
+    if (needsJump) {
       v.currentTime = targetTime;
+    }
+    if (msg.action === 'seek' || needsJump) {
+      // Guard against echo: remote sync seek can trigger local seeking/seeked late on laggy clients.
+      state.remoteSeekGuardUntil = now + CONFIG.remoteSeekGuardMs;
     }
     if (targetRate > 0 && Number.isFinite(targetRate)) {
       v.playbackRate = targetRate;
@@ -370,13 +379,24 @@
     let lastTime = 0;
     let lastPaused = null;
     let lastRate = 1;
+    let lastSeekSentAt = 0;
 
     const maybeSend = (silent, action, effect) => {
       if (!state.connected || !state.currentRoom) {
         return;
       }
-      if (nowMs() < state.suppressUntil) {
+      const now = nowMs();
+      if (now < state.suppressUntil) {
         return;
+      }
+      if (action === 'seek' && now < state.remoteSeekGuardUntil) {
+        return;
+      }
+      if (action === 'seek' && (now - lastSeekSentAt) < CONFIG.seekCooldownMs) {
+        return;
+      }
+      if (action === 'seek') {
+        lastSeekSentAt = now;
       }
       sendSyncState(!!silent, action, effect);
     };
