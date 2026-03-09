@@ -9,6 +9,7 @@ const (
 	TypeHello   = "hello"
 	TypeSpace   = "space"
 	TypeTrigger = "trigger"
+	TypeOffline = "offline"
 )
 
 type Message struct {

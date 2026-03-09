@@ -129,6 +129,11 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 
 	defer func() {
 		h.remove(c.id)
+		h.broadcastExclude(c.id, protocol.Message{
+			Type: protocol.TypeOffline,
+			From: c.name,
+			At:   time.Now().UnixMilli(),
+		})
 		_ = conn.Close()
 		log.Printf("client disconnected: %s", c.id)
 	}()

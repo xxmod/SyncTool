@@ -113,16 +113,23 @@ func readLoop(conn *websocket.Conn, errCh chan<- error, stop <-chan struct{}, su
 			continue
 		}
 
-		if msg.Type != protocol.TypeTrigger {
-			continue
-		}
+		switch msg.Type {
+		case protocol.TypeTrigger:
+			atomic.StoreInt64(suppressUntilNs, time.Now().Add(300*time.Millisecond).UnixNano())
+			if err := iclient.SimulateSpacePress(); err != nil {
+				log.Printf("simulate space failed: %v", err)
+				continue
+			}
+			log.Printf("received trigger from %s, simulated space", msg.From)
 
-		atomic.StoreInt64(suppressUntilNs, time.Now().Add(300*time.Millisecond).UnixNano())
-		if err := iclient.SimulateSpacePress(); err != nil {
-			log.Printf("simulate space failed: %v", err)
-			continue
+		case protocol.TypeOffline:
+			atomic.StoreInt64(suppressUntilNs, time.Now().Add(300*time.Millisecond).UnixNano())
+			if err := iclient.SimulateSpacePress(); err != nil {
+				log.Printf("simulate space on offline failed: %v", err)
+				continue
+			}
+			log.Printf("user offline: %s, simulated space", msg.From)
 		}
-		log.Printf("received trigger from %s, simulated space", msg.From)
 	}
 }
 
