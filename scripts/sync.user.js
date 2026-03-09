@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Bilibili/Emby Video Sync (Room Panel)
+// @name         Bilibili/Emby 视频同步（房间面板）
 // @namespace    synctool
 // @version      0.2.0
-// @description  Sync video progress/play state by room across users on Bilibili and Emby.
-// @author       you
+// @description  在 B 站与 Emby 中按房间同步视频进度与播放状态。
+// @author       xxmod
 // @match        https://www.bilibili.com/*
 // @match        https://*/web/index.html*
 // @match        http://*/web/index.html*
@@ -22,6 +22,11 @@
     name: 'synctool_client_name',
     hidden: 'synctool_panel_hidden',
   };
+
+  // First run defaults to hidden panel. User can reopen via mini button.
+  if (localStorage.getItem(STORE.hidden) === null) {
+    localStorage.setItem(STORE.hidden, '1');
+  }
 
   const CONFIG = {
     wsURL: localStorage.getItem(STORE.wsURL) || 'ws://127.0.0.1:9000/ws',
@@ -96,14 +101,18 @@
     send({ type: 'leave_room', at: nowMs() });
   }
 
-  function sendSyncState() {
+  function sendSyncState(silent) {
     if (!state.currentRoom) {
-      setStatus('no room selected', '#f59e0b');
+      if (!silent) {
+        setStatus('未选择房间', '#f59e0b');
+      }
       return;
     }
     const v = getVideoElement();
     if (!v) {
-      setStatus('video not found', '#f59e0b');
+      if (!silent) {
+        setStatus('未找到视频元素', '#f59e0b');
+      }
       return;
     }
     send({
@@ -116,7 +125,9 @@
       url: location.href,
       at: nowMs(),
     });
-    setStatus(`synced ${state.currentRoom}`, '#10b981');
+    if (!silent) {
+      setStatus(`已同步到 ${state.currentRoom}`, '#10b981');
+    }
   }
 
   function applySyncState(msg) {
@@ -170,7 +181,7 @@
         return;
       }
       applySyncState(msg);
-      setStatus(`applied from ${msg.from || 'peer'}`, '#22c55e');
+      setStatus(`已应用来自 ${msg.from || '其他用户'} 的同步`, '#22c55e');
       return;
     }
 
@@ -196,15 +207,15 @@
       persistRoom(state.currentRoom);
       renderCurrentRoom();
       if (state.currentRoom) {
-        setStatus(`joined ${state.currentRoom}`, '#22c55e');
+        setStatus(`已加入 ${state.currentRoom}`, '#22c55e');
       } else {
-        setStatus('left room', '#f59e0b');
+        setStatus('已离开房间', '#f59e0b');
       }
       return;
     }
 
     if (msg.type === 'error') {
-      setStatus(msg.error || 'server error', '#ef4444');
+      setStatus(msg.error || '服务端错误', '#ef4444');
     }
   }
 
@@ -226,7 +237,7 @@
     try {
       ws = new WebSocket(CONFIG.wsURL);
     } catch (e) {
-      setStatus('ws create failed', '#ef4444');
+      setStatus('创建 WebSocket 失败', '#ef4444');
       setTimeout(() => connectWS(false), CONFIG.reconnectMs);
       return;
     }
@@ -236,7 +247,7 @@
 
     ws.onopen = () => {
       state.connected = true;
-      setStatus('connected', '#22c55e');
+      setStatus('已连接', '#22c55e');
       sendHello();
       requestRoomList();
       if (state.currentRoom) {
@@ -251,7 +262,7 @@
       state.connected = false;
       renderStatus();
       if (!state.manualClose) {
-        setStatus('disconnected, retrying...', '#f59e0b');
+        setStatus('连接断开，正在重连...', '#f59e0b');
         setTimeout(() => connectWS(false), CONFIG.reconnectMs);
       }
     };
@@ -278,32 +289,61 @@
   }
 
   function installAutoBroadcastHooks() {
-    const tryHook = () => {
-      const v = getVideoElement();
-      if (!v || v.dataset.synctoolHooked === '1') {
+    let lastVideo = null;
+    let lastTime = 0;
+    let lastPaused = null;
+    let lastRate = 1;
+
+    const maybeSend = (silent) => {
+      if (!state.connected || !state.currentRoom) {
         return;
       }
-      v.dataset.synctoolHooked = '1';
-
-      const maybeSend = () => {
-        if (!state.connected || !state.currentRoom) {
-          return;
-        }
-        if (nowMs() < state.suppressUntil) {
-          return;
-        }
-        sendSyncState();
-      };
-
-      v.addEventListener('seeked', maybeSend);
-      v.addEventListener('pause', maybeSend);
-      v.addEventListener('play', maybeSend);
-      v.addEventListener('ratechange', maybeSend);
-      log('video hooks installed');
+      if (nowMs() < state.suppressUntil) {
+        return;
+      }
+      sendSyncState(!!silent);
     };
 
-    const timer = setInterval(tryHook, 1000);
-    setTimeout(() => clearInterval(timer), 30000);
+    const tryHook = () => {
+      const v = getVideoElement();
+      if (!v) {
+        return;
+      }
+      if (v !== lastVideo || v.dataset.synctoolHooked !== '1') {
+        v.dataset.synctoolHooked = '1';
+        lastVideo = v;
+        lastTime = Number(v.currentTime || 0);
+        lastPaused = !!v.paused;
+        lastRate = Number(v.playbackRate || 1);
+
+        const onEvent = () => maybeSend(true);
+        v.addEventListener('seeking', onEvent);
+        v.addEventListener('seeked', onEvent);
+        v.addEventListener('pause', onEvent);
+        v.addEventListener('play', onEvent);
+        v.addEventListener('ratechange', onEvent);
+        log('video hooks installed');
+      }
+
+      // Poll fallback for sites where some media events are not reliable.
+      const curTime = Number(v.currentTime || 0);
+      const curPaused = !!v.paused;
+      const curRate = Number(v.playbackRate || 1);
+
+      const timeJump = Math.abs(curTime - lastTime) > 2.0;
+      const pausedChanged = lastPaused !== null && curPaused !== lastPaused;
+      const rateChanged = Math.abs(curRate - lastRate) > 0.01;
+
+      if (timeJump || pausedChanged || rateChanged) {
+        maybeSend(true);
+      }
+
+      lastTime = curTime;
+      lastPaused = curPaused;
+      lastRate = curRate;
+    };
+
+    setInterval(tryHook, 1000);
     tryHook();
   }
 
@@ -320,9 +360,9 @@
 
   function renderStatus() {
     if (state.connected) {
-      setStatus(`connected as ${CONFIG.clientName}`, '#22c55e');
+      setStatus(`已连接：${CONFIG.clientName}`, '#22c55e');
     } else {
-      setStatus('disconnected', '#f59e0b');
+      setStatus('未连接', '#f59e0b');
     }
   }
 
@@ -402,8 +442,8 @@
     panel.id = 'synctool-panel';
     panel.style.cssText = [
       'position:fixed',
-      'top:12px',
-      'right:12px',
+      'bottom:12px',
+      'left:12px',
       'z-index:999999',
       'width:260px',
       'background:rgba(2,6,23,.94)',
@@ -416,10 +456,10 @@
     ].join(';');
 
     const title = document.createElement('div');
-    title.textContent = 'SyncTool';
+    title.textContent = '同步工具';
     title.style.cssText = 'font-weight:700;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;';
 
-    const hideBtn = button('Hide', () => hidePanel(true));
+    const hideBtn = button('隐藏', () => hidePanel(true));
     hideBtn.style.padding = '2px 6px';
     title.appendChild(hideBtn);
 
@@ -427,7 +467,7 @@
     status.style.cssText = 'margin-bottom:8px;color:#22c55e;';
 
     const wsLabel = document.createElement('div');
-    wsLabel.textContent = 'Server WS';
+    wsLabel.textContent = '服务器 WS 地址';
     wsLabel.style.marginBottom = '4px';
 
     const wsInput = document.createElement('input');
@@ -437,18 +477,18 @@
 
     const wsRow = document.createElement('div');
     wsRow.style.cssText = 'display:flex;gap:6px;margin-bottom:8px;';
-    const saveServerBtn = button('Save+Reconnect', () => {
+    const saveServerBtn = button('保存并重连', () => {
       CONFIG.wsURL = wsInput.value.trim() || CONFIG.wsURL;
       localStorage.setItem(STORE.wsURL, CONFIG.wsURL);
-      setStatus('reconnecting...', '#f59e0b');
+      setStatus('正在重连...', '#f59e0b');
       connectWS(true);
     });
-    const listBtn = button('Rooms', () => requestRoomList());
+    const listBtn = button('刷新房间', () => requestRoomList());
     wsRow.appendChild(saveServerBtn);
     wsRow.appendChild(listBtn);
 
     const roomLabel = document.createElement('div');
-    roomLabel.textContent = 'Room';
+    roomLabel.textContent = '房间';
     roomLabel.style.marginBottom = '4px';
 
     const roomSelect = document.createElement('select');
@@ -456,11 +496,11 @@
 
     const roomRow = document.createElement('div');
     roomRow.style.cssText = 'display:flex;gap:6px;margin-bottom:6px;';
-    const joinBtn = button('Join', () => {
+    const joinBtn = button('加入', () => {
       const room = roomSelect.value;
       joinRoom(room);
     });
-    const leaveBtn = button('Leave', () => leaveRoom());
+    const leaveBtn = button('离开', () => leaveRoom());
     roomRow.appendChild(joinBtn);
     roomRow.appendChild(leaveBtn);
 
@@ -470,9 +510,9 @@
 
     const actionRow = document.createElement('div');
     actionRow.style.cssText = 'display:flex;gap:6px;';
-    const syncBtn = button('Sync Now', () => sendSyncState());
-    const nameBtn = button('Rename', () => {
-      const n = prompt('Input your display name', CONFIG.clientName);
+    const syncBtn = button('立即同步', () => sendSyncState());
+    const nameBtn = button('改名', () => {
+      const n = prompt('请输入显示名', CONFIG.clientName);
       if (!n) return;
       CONFIG.clientName = n.trim();
       localStorage.setItem(STORE.name, CONFIG.clientName);
@@ -495,11 +535,11 @@
 
     const mini = document.createElement('button');
     mini.type = 'button';
-    mini.textContent = 'SyncTool';
+    mini.textContent = '同步';
     mini.style.cssText = [
       'position:fixed',
-      'top:12px',
-      'right:12px',
+      'bottom:12px',
+      'left:12px',
       'z-index:999999',
       'display:none',
       'padding:6px 10px',
