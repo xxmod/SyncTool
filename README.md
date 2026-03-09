@@ -46,7 +46,7 @@ go run ./cmd/client -server ws://127.0.0.1:9000/ws
 
 ## 通过 .env 构建默认配置
 
-`build.bat` 会读取根目录 `.env`，并把默认值写入 exe（build-time 注入）：
+`build.go` 会读取根目录 `.env`，并把默认值写入构建产物（build-time 注入）：
 
 - `DEFAULT_SERVER_PORT`：服务端默认监听端口（例如 `9000`）
 - `DEFAULT_SERVER_ADDR`：客户端默认连接地址（例如 `ws://192.168.1.49:9000/ws` 或 `wss://your-domain/ws`）
@@ -60,11 +60,38 @@ DEFAULT_SERVER_ADDR=ws://192.168.1.49:9000/ws
 
 构建：
 
-```bat
-build.bat
+```bash
+go run ./build.go
 ```
 
-构建后的 `synctool-client.exe` 与 `synctool-server.exe` 在不传参数时会使用注入后的默认值。
+按架构控制构建（示例）：
+
+```bash
+go run ./build.go -amd64=true -arm64=false
+```
+
+默认会构建以下平台：
+
+- `windows/amd64`、`windows/arm64`
+- `linux/amd64`、`linux/arm64`
+- `darwin/amd64`、`darwin/arm64`
+
+产物在 `bin/` 下，命名示例：
+
+- `synctool-server-windows-amd64.exe`
+- `synctool-client-linux-amd64`
+
+如果 `go run ./build.go` 在 Windows 报错：
+
+`exec: "...\\build": executable file not found in %PATH%`
+
+通常是当前终端被设置了 `GOOS=linux` / `GOARCH=amd64`。先清理再运行：
+
+```powershell
+Remove-Item Env:GOOS -ErrorAction SilentlyContinue
+Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
+go run .\build.go
+```
 
 ## 测试方式
 
