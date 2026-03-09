@@ -1,22 +1,26 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"log"
-	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"synctool/internal/protocol"
 )
+
+var buildDefaultServerPort string
 
 type client struct {
 	id   string
 	name string
-	conn net.Conn
+	conn *websocket.Conn
 	wmu  sync.Mutex
 }
 
@@ -61,8 +65,7 @@ func sendMessage(c *client, msg protocol.Message) error {
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	_, err = c.conn.Write(payload)
-	return err
+	return c.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
 var seq uint64
@@ -73,33 +76,56 @@ func nextClientID() string {
 }
 
 func main() {
-	listenAddr := flag.String("listen", ":9000", "server listen address")
+	listenAddr := flag.String("listen", defaultListenAddr(), "server listen address")
+	wsPath := flag.String("ws-path", "/ws", "websocket endpoint path")
 	flag.Parse()
 
-	ln, err := net.Listen("tcp", *listenAddr)
-	if err != nil {
-		log.Fatalf("listen failed: %v", err)
-	}
-	defer ln.Close()
-
 	h := newHub()
-	log.Printf("server listening at %s", *listenAddr)
+	upgrader := websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Printf("accept failed: %v", err)
-			continue
-		}
-		go handleConn(h, conn)
+	mux := http.NewServeMux()
+	mux.HandleFunc(*wsPath, func(w http.ResponseWriter, r *http.Request) {
+		handleWS(h, &upgrader, w, r)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("synctool server ok\n"))
+	})
+
+	log.Printf("server listening at %s, ws endpoint %s", *listenAddr, *wsPath)
+	if err := http.ListenAndServe(*listenAddr, mux); err != nil {
+		log.Fatalf("server failed: %v", err)
 	}
 }
 
-func handleConn(h *hub, conn net.Conn) {
+func defaultListenAddr() string {
+	port := strings.TrimSpace(buildDefaultServerPort)
+	if port == "" {
+		return ":9000"
+	}
+	if strings.HasPrefix(port, ":") {
+		return port
+	}
+	return ":" + port
+}
+
+func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("upgrade failed: %v", err)
+		return
+	}
+
 	id := nextClientID()
 	c := &client{id: id, conn: conn, name: id}
 	h.add(c)
-	log.Printf("client connected: %s (%s)", c.id, conn.RemoteAddr().String())
+	log.Printf("client connected: %s (%s)", c.id, r.RemoteAddr)
 
 	defer func() {
 		h.remove(c.id)
@@ -107,10 +133,13 @@ func handleConn(h *hub, conn net.Conn) {
 		log.Printf("client disconnected: %s", c.id)
 	}()
 
-	sc := bufio.NewScanner(conn)
-	for sc.Scan() {
-		line := sc.Bytes()
-		msg, err := protocol.Decode(line)
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+
+		msg, err := protocol.Decode(data)
 		if err != nil {
 			log.Printf("decode failed from %s: %v", c.id, err)
 			continue
@@ -124,20 +153,12 @@ func handleConn(h *hub, conn net.Conn) {
 			log.Printf("hello: %s as %s", c.id, c.name)
 
 		case protocol.TypeSpace:
-			trigger := protocol.Message{
-				Type: protocol.TypeTrigger,
-				From: c.name,
-				At:   time.Now().UnixMilli(),
-			}
+			trigger := protocol.Message{Type: protocol.TypeTrigger, From: c.name, At: time.Now().UnixMilli()}
 			log.Printf("space event from %s (%s)", c.id, c.name)
 			h.broadcastExclude(c.id, trigger)
 
 		default:
 			log.Printf("unknown message type from %s: %s", c.id, msg.Type)
 		}
-	}
-
-	if err := sc.Err(); err != nil {
-		log.Printf("read failed from %s: %v", c.id, err)
 	}
 }

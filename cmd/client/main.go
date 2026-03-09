@@ -1,20 +1,23 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"log"
-	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	iclient "synctool/internal/client"
 	"synctool/internal/protocol"
 )
 
+var buildDefaultServerAddr string
+
 func main() {
-	serverAddr := flag.String("server", "127.0.0.1:9000", "server address")
+	serverAddr := flag.String("server", defaultServerAddr(), "websocket server address, e.g. ws://127.0.0.1:9000/ws")
 	name := flag.String("name", "", "client display name")
 	flag.Parse()
 
@@ -38,7 +41,7 @@ func main() {
 }
 
 func runClient(serverAddr, displayName string) error {
-	conn, err := net.Dial("tcp", serverAddr)
+	conn, _, err := websocket.DefaultDialer.Dial(serverAddr, nil)
 	if err != nil {
 		return err
 	}
@@ -46,7 +49,8 @@ func runClient(serverAddr, displayName string) error {
 
 	log.Printf("connected to %s as %s", serverAddr, displayName)
 
-	if err := writeMessage(conn, protocol.Message{Type: protocol.TypeHello, Name: displayName}); err != nil {
+	var writeMu sync.Mutex
+	if err := writeMessage(conn, &writeMu, protocol.Message{Type: protocol.TypeHello, Name: displayName}); err != nil {
 		return err
 	}
 
@@ -79,7 +83,7 @@ func runClient(serverAddr, displayName string) error {
 			}
 
 			if down && !lastDown {
-				if err := writeMessage(conn, protocol.Message{Type: protocol.TypeSpace, At: now.UnixMilli()}); err != nil {
+				if err := writeMessage(conn, &writeMu, protocol.Message{Type: protocol.TypeSpace, At: now.UnixMilli()}); err != nil {
 					close(stop)
 					return err
 				}
@@ -89,16 +93,21 @@ func runClient(serverAddr, displayName string) error {
 	}
 }
 
-func readLoop(conn net.Conn, errCh chan<- error, stop <-chan struct{}, suppressUntilNs *int64) {
-	sc := bufio.NewScanner(conn)
-	for sc.Scan() {
+func readLoop(conn *websocket.Conn, errCh chan<- error, stop <-chan struct{}, suppressUntilNs *int64) {
+	for {
 		select {
 		case <-stop:
 			return
 		default:
 		}
 
-		msg, err := protocol.Decode(sc.Bytes())
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			errCh <- err
+			return
+		}
+
+		msg, err := protocol.Decode(data)
 		if err != nil {
 			log.Printf("decode failed: %v", err)
 			continue
@@ -115,18 +124,21 @@ func readLoop(conn net.Conn, errCh chan<- error, stop <-chan struct{}, suppressU
 		}
 		log.Printf("received trigger from %s, simulated space", msg.From)
 	}
-	if err := sc.Err(); err != nil {
-		errCh <- err
-		return
-	}
-	errCh <- net.ErrClosed
 }
 
-func writeMessage(conn net.Conn, msg protocol.Message) error {
+func writeMessage(conn *websocket.Conn, mu *sync.Mutex, msg protocol.Message) error {
 	payload, err := protocol.Encode(msg)
 	if err != nil {
 		return err
 	}
-	_, err = conn.Write(payload)
-	return err
+	mu.Lock()
+	defer mu.Unlock()
+	return conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+func defaultServerAddr() string {
+	if buildDefaultServerAddr != "" {
+		return buildDefaultServerAddr
+	}
+	return "ws://127.0.0.1:9000/ws"
 }

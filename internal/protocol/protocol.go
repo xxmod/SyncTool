@@ -23,7 +23,7 @@ func Encode(msg Message) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal message: %w", err)
 	}
-	return append(b, '\n'), nil
+	return b, nil
 }
 
 func Decode(line []byte) (Message, error) {
