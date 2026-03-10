@@ -301,15 +301,6 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			log.Printf("client %s left room", c.id)
 			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: "", Rooms: h.roomList(), At: time.Now().UnixMilli()})
 
-		case protocol.TypeSpace:
-			room := h.getClientRoom(c.id)
-			if room == "" {
-				continue
-			}
-			trigger := protocol.Message{Type: protocol.TypeTrigger, From: c.name, Room: room, At: time.Now().UnixMilli()}
-			log.Printf("space event from %s (%s) room=%s", c.id, c.name, room)
-			h.broadcastExcludeInRoom(c.id, room, trigger)
-
 		case protocol.TypeSync:
 			room := h.getClientRoom(c.id)
 			if room == "" {

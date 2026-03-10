@@ -26,7 +26,6 @@ func main() {
 
 	envMap := loadDotEnv(".env")
 	defaultPort := firstNonEmpty(envMap["DEFAULT_SERVER_PORT"], "9000")
-	defaultAddr := firstNonEmpty(envMap["DEFAULT_SERVER_ADDR"], "ws://127.0.0.1:9000/ws")
 	defaultRoomCount := firstNonEmpty(envMap["DEFAULT_SERVER_ROOM_COUNT"], "3")
 
 	if err := os.MkdirAll("bin", 0o755); err != nil {
@@ -51,10 +50,8 @@ func main() {
 
 	for _, t := range targets {
 		serverName := binName("synctool-server", t.goos, t.goarch)
-		clientName := binName("synctool-client", t.goos, t.goarch)
 
 		serverPath := filepath.Join("bin", serverName)
-		clientPath := filepath.Join("bin", clientName)
 
 		fmt.Printf("Building %s/%s server -> %s\n", t.goos, t.goarch, serverPath)
 		err := goBuild(
@@ -66,16 +63,10 @@ func main() {
 		if err != nil {
 			fatalf("build server for %s/%s failed: %v", t.goos, t.goarch, err)
 		}
-
-		fmt.Printf("Building %s/%s client -> %s\n", t.goos, t.goarch, clientPath)
-		err = goBuild(t, clientPath, "./cmd/client", "-X main.buildDefaultServerAddr="+defaultAddr)
-		if err != nil {
-			fatalf("build client for %s/%s failed: %v", t.goos, t.goarch, err)
-		}
 	}
 
 	fmt.Println("Build finished.")
-	fmt.Printf("Injected defaults: DEFAULT_SERVER_PORT=%s, DEFAULT_SERVER_ADDR=%s, DEFAULT_SERVER_ROOM_COUNT=%s\n", defaultPort, defaultAddr, defaultRoomCount)
+	fmt.Printf("Injected defaults: DEFAULT_SERVER_PORT=%s, DEFAULT_SERVER_ROOM_COUNT=%s\n", defaultPort, defaultRoomCount)
 }
 
 func goBuild(t target, outPath, pkg, ldflags string) error {

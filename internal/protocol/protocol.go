@@ -7,8 +7,6 @@ import (
 
 const (
 	TypeHello   = "hello"
-	TypeSpace   = "space"
-	TypeTrigger = "trigger"
 	TypeOffline = "offline"
 	TypeSync    = "sync_state"
 	TypeList    = "list_rooms"
