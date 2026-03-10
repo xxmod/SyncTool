@@ -1,10 +1,9 @@
 // ==UserScript==
 // @name         Bilibili/Emby 视频同步（房间面板）
 // @namespace    synctool
-// @version      0.0.1
-// @description  在 B 站与 Emby 中按房间同步视频进度与播放状态。
+// @version      0.0.2
+// @description  在 Emby 中按房间同步视频进度与播放状态。
 // @author       xxmod
-// @match        https://www.bilibili.com/*
 // @match        https://*/web/index.html*
 // @match        http://*/web/index.html*
 // @match        https://*/web/*
@@ -381,6 +380,12 @@
     let lastRate = 1;
     let lastSeekSentAt = 0;
 
+    // Buffering (stall) detection state
+    let isBuffering = false;
+    let bufferingStartedAt = 0;
+    const BUFFERING_THRESHOLD_SEC = 0.15; // progress delta below this while playing = buffering
+    const BUFFERING_MIN_DURATION_MS = 800; // must buffer for at least this long to trigger sync on resume
+
     const maybeSend = (silent, action, effect) => {
       if (!state.connected || !state.currentRoom) {
         return;
@@ -412,6 +417,8 @@
         lastTime = Number(v.currentTime || 0);
         lastPaused = !!v.paused;
         lastRate = Number(v.playbackRate || 1);
+        isBuffering = false;
+        bufferingStartedAt = 0;
 
         v.addEventListener('seeking', () => maybeSend(true, 'seek', 'remote_seek'));
         v.addEventListener('seeked', () => maybeSend(true, 'seek', 'remote_seek'));
@@ -425,6 +432,29 @@
       const curTime = Number(v.currentTime || 0);
       const curPaused = !!v.paused;
       const curRate = Number(v.playbackRate || 1);
+      const now = nowMs();
+
+      // Buffering detection: playing but progress not advancing (or minimal change)
+      const timeDelta = curTime - lastTime;
+      const isPlaying = !curPaused;
+      const progressStalled = isPlaying && timeDelta >= 0 && timeDelta < BUFFERING_THRESHOLD_SEC;
+
+      if (progressStalled && !isBuffering) {
+        // Enter buffering state
+        isBuffering = true;
+        bufferingStartedAt = now;
+        log('buffering detected');
+      } else if (!progressStalled && isBuffering) {
+        // Exit buffering state: progress resumed
+        const bufferingDuration = now - bufferingStartedAt;
+        isBuffering = false;
+        if (bufferingDuration >= BUFFERING_MIN_DURATION_MS && isPlaying) {
+          log('buffering ended after', bufferingDuration, 'ms, syncing');
+          setStatus('卡顿结束，已同步', '#22c55e');
+          maybeSend(true, 'sync', 'buffering_resume');
+        }
+        bufferingStartedAt = 0;
+      }
 
       const timeJump = Math.abs(curTime - lastTime) > 2.0;
       const pausedChanged = lastPaused !== null && curPaused !== lastPaused;
