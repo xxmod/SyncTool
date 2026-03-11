@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Bilibili/Emby 视频同步（房间面板）
+// @name         Emby 视频同步（房间面板）
 // @namespace    synctool
-// @version      0.0.2
+// @version      0.0.3
 // @description  在 Emby 中按房间同步视频进度与播放状态。
 // @author       xxmod
 // @match        https://*/web/index.html*
@@ -20,6 +20,8 @@
     roomId: 'synctool_room_id',
     name: 'synctool_client_name',
     hidden: 'synctool_panel_hidden',
+    disableAutoJump: 'synctool_disable_auto_jump',
+    lastItemId: 'synctool_last_item_id',
   };
 
   // First run defaults to expanded panel. Later runs keep persisted state.
@@ -31,6 +33,7 @@
     wsURL: localStorage.getItem(STORE.wsURL) || 'ws://127.0.0.1:9000/ws',
     roomId: localStorage.getItem(STORE.roomId) || '',
     clientName: localStorage.getItem(STORE.name) || `tm-${Math.random().toString(36).slice(2, 8)}`,
+    disableAutoJump: localStorage.getItem(STORE.disableAutoJump) === '1',
     hotkeySync: { ctrl: true, shift: true, key: 'S' },
     jumpToleranceSec: 0.35,
     remoteSeekGuardMs: 2200,
@@ -46,9 +49,12 @@
     connected: false,
     suppressUntil: 0,
     remoteSeekGuardUntil: 0,
+    lastKnownItemId: localStorage.getItem(STORE.lastItemId) || '',
     rooms: [],
     currentRoom: CONFIG.roomId,
     manualClose: false,
+    pendingSync: null,
+    pendingSyncExpiry: 0,
     ui: {
       panel: null,
       mini: null,
@@ -57,6 +63,7 @@
       roomSelect: null,
       roomText: null,
       wsInput: null,
+      disableAutoJump: null,
     },
   };
 
@@ -77,6 +84,419 @@
       }
     }
     return null;
+  }
+
+  function rememberItemId(itemId) {
+    const value = String(itemId || '').trim();
+    if (value) {
+      state.lastKnownItemId = value;
+      localStorage.setItem(STORE.lastItemId, value);
+    }
+    return value;
+  }
+
+  function extractItemIdFromValue(value) {
+    if (!value) {
+      return '';
+    }
+    const text = String(value);
+    const videoMatch = text.match(/\/[Vv]ideos\/([^/?]+)/);
+    if (videoMatch) {
+      return videoMatch[1];
+    }
+    const itemQueryMatch = text.match(/[?#&]id=([^&#]+)/i);
+    if (itemQueryMatch) {
+      return decodeURIComponent(itemQueryMatch[1]);
+    }
+    return '';
+  }
+
+  function extractItemIdFromObject(obj) {
+    if (!obj || typeof obj !== 'object') {
+      return '';
+    }
+    const directKeys = ['ItemId', 'itemId', 'Id', 'id'];
+    for (const key of directKeys) {
+      if (obj[key]) {
+        return String(obj[key]);
+      }
+    }
+
+    const nestedCandidates = [
+      obj.MediaSource,
+      obj.mediaSource,
+      obj.NowPlayingItem,
+      obj.nowPlayingItem,
+      obj.Item,
+      obj.item,
+      obj.CurrentItem,
+      obj.currentItem,
+    ];
+    for (const candidate of nestedCandidates) {
+      const nestedItemId = extractItemIdFromObject(candidate);
+      if (nestedItemId) {
+        return nestedItemId;
+      }
+    }
+
+    const urlKeys = ['Path', 'path', 'TranscodingUrl', 'transcodingUrl', 'Url', 'url', 'src'];
+    for (const key of urlKeys) {
+      const fromValue = extractItemIdFromValue(obj[key]);
+      if (fromValue) {
+        return fromValue;
+      }
+    }
+
+    return '';
+  }
+
+  function rememberItemIdFromPageContext() {
+    const sources = [
+      location.hash,
+      location.href,
+      document.body && document.body.getAttribute && document.body.getAttribute('data-itemid'),
+      document.body && document.body.dataset && document.body.dataset.itemid,
+    ];
+
+    const dataSelectors = [
+      '[data-itemid]',
+      '[data-id]',
+      '.detailPagePrimaryContainer',
+      '.itemDetailPage',
+    ];
+    for (const selector of dataSelectors) {
+      const el = document.querySelector(selector);
+      if (!el) {
+        continue;
+      }
+      sources.push(el.getAttribute && el.getAttribute('data-itemid'));
+      sources.push(el.getAttribute && el.getAttribute('data-id'));
+      sources.push(el.dataset && el.dataset.itemid);
+      sources.push(el.dataset && el.dataset.id);
+    }
+
+    for (const source of sources) {
+      const itemId = extractItemIdFromValue(source);
+      if (itemId) {
+        return rememberItemId(itemId);
+      }
+    }
+    return '';
+  }
+
+  function extractItemIdFromPlaybackRequest(url) {
+    if (!url) {
+      return '';
+    }
+    const text = String(url);
+    const patterns = [
+      /\/[Vv]ideos\/([^/?#]+)/,
+      /\/[Ii]tems\/([^/?#]+)\/[Pp]layback[Ii]nfo/,
+      /[?&]MediaSourceId=mediasource_([^&#]+)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    return '';
+  }
+
+  function installPlaybackRequestTracking() {
+    const rememberFromURL = (url, source) => {
+      const itemId = extractItemIdFromPlaybackRequest(url);
+      if (itemId) {
+        rememberItemId(itemId);
+        log('remembered itemId from ' + source + ':', itemId, url);
+      }
+    };
+
+    const originalFetch = window.fetch;
+    if (typeof originalFetch === 'function') {
+      window.fetch = function (...args) {
+        try {
+          const request = args[0];
+          const url = typeof request === 'string' ? request : (request && request.url);
+          rememberFromURL(url, 'fetch');
+        } catch {
+        }
+        return originalFetch.apply(this, args);
+      };
+    }
+
+    const originalOpen = window.XMLHttpRequest && window.XMLHttpRequest.prototype && window.XMLHttpRequest.prototype.open;
+    if (typeof originalOpen === 'function') {
+      window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+        try {
+          rememberFromURL(url, 'xhr');
+        } catch {
+        }
+        return originalOpen.call(this, method, url, ...rest);
+      };
+    }
+  }
+
+  function getEmbyItemId() {
+    const pageItemId = rememberItemIdFromPageContext();
+    if (pageItemId && /[?#&]id=/i.test(String(location.hash || '')) && !/videoosd/i.test(String(location.hash || ''))) {
+      return pageItemId;
+    }
+
+    const v = getVideoElement();
+    const directSources = [
+      v && v.currentSrc,
+      v && v.src,
+      location.hash,
+      location.href,
+    ];
+    for (const source of directSources) {
+      const itemId = extractItemIdFromValue(source);
+      if (itemId) {
+        return rememberItemId(itemId);
+      }
+    }
+
+    const mgr = findPlaybackManager();
+    if (mgr) {
+      const managerCandidates = [
+        mgr,
+        typeof mgr.getCurrentItem === 'function' ? mgr.getCurrentItem() : null,
+        typeof mgr.currentItem === 'function' ? mgr.currentItem() : null,
+        mgr.currentItem,
+        mgr._currentItem,
+        mgr._currentMediaSource,
+        mgr.currentMediaSource,
+        mgr._currentPlayer,
+        mgr.currentPlayer,
+        typeof mgr.getPlayerInfo === 'function' ? mgr.getPlayerInfo() : null,
+      ];
+      for (const candidate of managerCandidates) {
+        const itemId = extractItemIdFromObject(candidate);
+        if (itemId) {
+          return rememberItemId(itemId);
+        }
+      }
+    }
+
+    const apiClient = window.ApiClient;
+    if (apiClient) {
+      const apiCandidates = [
+        apiClient._appState,
+        apiClient.appState,
+        apiClient._currentItem,
+        apiClient.currentItem,
+      ];
+      for (const candidate of apiCandidates) {
+        const itemId = extractItemIdFromObject(candidate);
+        if (itemId) {
+          return rememberItemId(itemId);
+        }
+      }
+    }
+
+    return state.lastKnownItemId || '';
+  }
+
+  function getActiveEmbyItemId() {
+    const pageItemId = rememberItemIdFromPageContext();
+    if (pageItemId && /[?#&]id=/i.test(String(location.hash || '')) && !/videoosd/i.test(String(location.hash || ''))) {
+      return pageItemId;
+    }
+
+    const v = getVideoElement();
+    if (v) {
+      const sources = [v.currentSrc, v.src, location.hash, location.href];
+      for (const source of sources) {
+        const itemId = extractItemIdFromValue(source);
+        if (itemId) {
+          return rememberItemId(itemId);
+        }
+      }
+    }
+
+    const mgr = findPlaybackManager();
+    if (mgr) {
+      const managerCandidates = [
+        mgr,
+        typeof mgr.getCurrentItem === 'function' ? mgr.getCurrentItem() : null,
+        typeof mgr.currentItem === 'function' ? mgr.currentItem() : null,
+        mgr.currentItem,
+        mgr._currentItem,
+        mgr._currentMediaSource,
+        mgr.currentMediaSource,
+        mgr._currentPlayer,
+        mgr.currentPlayer,
+        typeof mgr.getPlayerInfo === 'function' ? mgr.getPlayerInfo() : null,
+      ];
+      for (const candidate of managerCandidates) {
+        const itemId = extractItemIdFromObject(candidate);
+        if (itemId) {
+          return rememberItemId(itemId);
+        }
+      }
+    }
+
+    return '';
+  }
+
+  function installItemContextTracking() {
+    rememberItemIdFromPageContext();
+
+    document.addEventListener('click', (evt) => {
+      const target = evt.target && evt.target.closest ? evt.target.closest('.btnPlay, .detailButton, [data-action="play"], [data-action="resume"]') : null;
+      if (!target) {
+        return;
+      }
+
+      const localItemId = rememberItemIdFromPageContext();
+      if (localItemId) {
+        log('remembered itemId from page context before play:', localItemId);
+        return;
+      }
+
+      const targetItemId = extractItemIdFromValue(target.getAttribute('data-id'))
+        || extractItemIdFromValue(target.getAttribute('data-itemid'))
+        || extractItemIdFromValue(target.dataset && target.dataset.id)
+        || extractItemIdFromValue(target.dataset && target.dataset.itemid);
+      if (targetItemId) {
+        rememberItemId(targetItemId);
+        log('remembered itemId from play button:', targetItemId);
+      }
+    }, true);
+
+    window.addEventListener('hashchange', () => {
+      const itemId = rememberItemIdFromPageContext();
+      if (itemId) {
+        log('remembered itemId from hash change:', itemId);
+      }
+    }, true);
+  }
+
+  function findPlaybackManager() {
+    // 1. Search RequireJS internal registry for already-loaded module
+    try {
+      if (typeof window.require === 'function' && window.require.s && window.require.s.contexts) {
+        const defined = (window.require.s.contexts._ || {}).defined || {};
+        for (const key of Object.keys(defined)) {
+          if (/playback.?manager/i.test(key)) {
+            const mod = defined[key];
+            const mgr = mod && (mod.default || mod);
+            if (mgr && typeof mgr.play === 'function') return mgr;
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    // 2. Global scope
+    if (window.playbackManager && typeof window.playbackManager.play === 'function') {
+      return window.playbackManager;
+    }
+    return null;
+  }
+
+  function buildItemHash(itemId, serverId) {
+    return '#!/item?id=' + encodeURIComponent(itemId) + '&serverId=' + encodeURIComponent(serverId);
+  }
+
+  function navigateToItemPage(itemId, serverId) {
+    const targetHash = buildItemHash(itemId, serverId);
+    const targetURL = location.origin + location.pathname + targetHash;
+    try {
+      if (location.hash !== targetHash) {
+        history.pushState(null, '', targetHash);
+      }
+    } catch {
+      location.hash = targetHash;
+    }
+    try {
+      window.dispatchEvent(new Event('hashchange'));
+    } catch {
+    }
+    setTimeout(() => {
+      if (location.hash !== targetHash) {
+        location.replace(targetURL);
+      }
+    }, 300);
+  }
+
+  function tryAutoClickPlayButton() {
+    let attempts = 0;
+    const watcher = setInterval(() => {
+      attempts += 1;
+      if (attempts > 24) {
+        clearInterval(watcher);
+        showNotice('请手动点击播放按钮', '#f59e0b');
+        return;
+      }
+      const selectors = [
+        '[data-action="resume"]',
+        '[data-action="play"]',
+        '.btnPlay',
+        'button.play-button',
+        '.detailButton[data-action="resume"]',
+        '.detailButton[data-action="play"]',
+        '.mainDetailButtons .btnResume',
+      ];
+      for (const selector of selectors) {
+        const btn = document.querySelector(selector);
+        if (!btn) {
+          continue;
+        }
+        btn.click();
+        clearInterval(watcher);
+        log('Auto-clicked play button with selector', selector);
+        showNotice('已自动开始播放', '#22c55e');
+        return;
+      }
+    }, 500);
+  }
+
+  function playEmbyItem(itemId) {
+    rememberItemId(itemId);
+    log('Switching to Emby item:', itemId);
+    showNotice('正在跳转到房间视频...', '#f59e0b');
+
+    const apiClient = window.ApiClient;
+    const serverId = (apiClient && typeof apiClient.serverId === 'function') ? apiClient.serverId() : '';
+    let played = false;
+
+    // Strategy 1: Synchronously find playbackManager from RequireJS registry / globals
+    const mgr = findPlaybackManager();
+    if (mgr) {
+      played = true;
+      mgr.play({ ids: [itemId], serverId: serverId });
+      log('Started playback via findPlaybackManager()');
+      return;
+    }
+
+    // Strategy 2: Try AMD async require (may work in some Emby versions)
+    if (typeof window.require === 'function') {
+      try {
+        window.require(['playbackManager'], function (pm) {
+          if (played) return;
+          const m = (pm && pm.default) || pm;
+          if (m && typeof m.play === 'function') {
+            played = true;
+            m.play({ ids: [itemId], serverId: serverId });
+            log('Started playback via async require');
+          }
+        });
+      } catch (e) { /* ignore */ }
+    }
+
+    // Strategy 3: navigate to item page and auto-click play button.
+    // This path is important for Edge where playbackManager lookup may never resolve.
+    setTimeout(() => {
+      if (played) return;
+      played = true;
+      if (!serverId) {
+        showNotice('无法自动播放，请手动切换视频', '#ef4444');
+        return;
+      }
+      log('playbackManager unavailable, navigating to item page');
+      navigateToItemPage(itemId, serverId);
+      tryAutoClickPlayButton();
+    }, 2000);
   }
 
   function send(obj) {
@@ -119,6 +539,7 @@
       }
       return;
     }
+    const itemId = getEmbyItemId();
     send({
       type: 'sync_state',
       from: CONFIG.clientName,
@@ -129,8 +550,13 @@
       paused: v.paused,
       rate: v.playbackRate || 1,
       url: location.href,
+      itemId,
       at: nowMs(),
     });
+    log('sending sync_state', { action: action || 'sync', itemId, room: state.currentRoom, currentTime: v.currentTime, paused: v.paused });
+    if (!itemId) {
+      log('sync_state sent without itemId');
+    }
     if (!silent) {
       setStatus(`已同步到 ${state.currentRoom}`, '#10b981');
     }
@@ -173,6 +599,24 @@
   }
 
   function applySyncState(msg) {
+    const localItemId = getActiveEmbyItemId();
+    const remoteItemId = msg.itemId || '';
+    if (remoteItemId) {
+      rememberItemId(remoteItemId);
+    }
+    // Remote is playing a different Emby item → navigate to it, defer sync
+    if (remoteItemId && localItemId !== remoteItemId) {
+      if (CONFIG.disableAutoJump) {
+        showNotice('房间正在播放其他视频，已禁用自动跳转', '#f59e0b');
+        return false;
+      }
+      log('Different item, switching from', localItemId || '(none)', 'to', remoteItemId);
+      state.pendingSync = msg;
+      state.pendingSyncExpiry = nowMs() + 15000;
+      playEmbyItem(remoteItemId);
+      return false;
+    }
+
     const v = getVideoElement();
     if (!v) {
       return;
@@ -232,15 +676,17 @@
     }
 
     if (msg.type === 'sync_state') {
+      log('received sync_state', { from: msg.from, itemId: msg.itemId || '', room: msg.room, currentTime: msg.currentTime, paused: msg.paused });
       if (!sameRoom(msg)) {
         return;
       }
       if (msg.from === CONFIG.clientName) {
         return;
       }
-      applySyncState(msg);
-      setStatus(`已应用来自 ${msg.from || '其他用户'} 的同步`, '#22c55e');
-      showNotice(`${msg.from || '其他用户'}${actionLabel(msg.action)}，${effectLabel(msg)}`, '#22c55e');
+      if (applySyncState(msg) !== false) {
+        setStatus(`已应用来自 ${msg.from || '其他用户'} 的同步`, '#22c55e');
+        showNotice(`${msg.from || '其他用户'}${actionLabel(msg.action)}，${effectLabel(msg)}`, '#22c55e');
+      }
       return;
     }
 
@@ -426,6 +872,25 @@
         v.addEventListener('play', () => maybeSend(true, 'play', 'remote_play'));
         v.addEventListener('ratechange', () => maybeSend(true, 'ratechange', 'remote_ratechange'));
         log('video hooks installed');
+      }
+
+      // Apply pending sync from room join (wait until correct Emby item is loaded)
+      if (state.pendingSync) {
+        if (nowMs() > state.pendingSyncExpiry) {
+          log('pending sync expired');
+          state.pendingSync = null;
+        } else {
+          const currentItemId = getEmbyItemId();
+          const pendingItemId = state.pendingSync.itemId || '';
+          if (currentItemId && currentItemId === pendingItemId) {
+            const pending = state.pendingSync;
+            state.pendingSync = null;
+            state.suppressUntil = nowMs() + 1500;
+            applySyncState(pending);
+            setStatus('已同步到房间视频', '#22c55e');
+            showNotice('已跳转到房间视频并开始同步', '#22c55e');
+          }
+        }
       }
 
       // Poll fallback for sites where some media events are not reliable.
@@ -659,6 +1124,21 @@
     current.style.cssText = 'margin-bottom:8px;color:#cbd5e1;';
     current.textContent = '(none)';
 
+    const jumpRow = document.createElement('label');
+    jumpRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:8px;color:#cbd5e1;cursor:pointer;';
+    const jumpCheckbox = document.createElement('input');
+    jumpCheckbox.type = 'checkbox';
+    jumpCheckbox.checked = CONFIG.disableAutoJump;
+    jumpCheckbox.addEventListener('change', () => {
+      CONFIG.disableAutoJump = jumpCheckbox.checked;
+      localStorage.setItem(STORE.disableAutoJump, CONFIG.disableAutoJump ? '1' : '0');
+      showNotice(CONFIG.disableAutoJump ? '已关闭自动跳转视频' : '已开启自动跳转视频', '#22c55e');
+    });
+    const jumpText = document.createElement('span');
+    jumpText.textContent = '不跳转视频';
+    jumpRow.appendChild(jumpCheckbox);
+    jumpRow.appendChild(jumpText);
+
     const actionRow = document.createElement('div');
     actionRow.style.cssText = 'display:flex;gap:6px;';
     const syncBtn = button('立即同步', () => sendSyncState());
@@ -682,6 +1162,7 @@
     panel.appendChild(roomSelect);
     panel.appendChild(roomRow);
     panel.appendChild(current);
+    panel.appendChild(jumpRow);
     panel.appendChild(actionRow);
 
     const mini = document.createElement('button');
@@ -719,6 +1200,7 @@
     state.ui.roomSelect = roomSelect;
     state.ui.roomText = current;
     state.ui.wsInput = wsInput;
+    state.ui.disableAutoJump = jumpCheckbox;
 
     const hidden = localStorage.getItem(STORE.hidden) === '1';
     if (hidden) {
@@ -760,6 +1242,8 @@
   function bootstrap() {
     buildUI();
     installConsoleHelper();
+    installItemContextTracking();
+    installPlaybackRequestTracking();
     installHotkey();
     installAutoBroadcastHooks();
     document.addEventListener('fullscreenchange', onFullscreenChanged);

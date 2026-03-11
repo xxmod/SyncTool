@@ -25,6 +25,7 @@ type Message struct {
 	Room        string   `json:"room,omitempty"`
 	Rooms       []string `json:"rooms,omitempty"`
 	URL         string   `json:"url,omitempty"`
+	ItemID      string   `json:"itemId,omitempty"`
 	CurrentTime float64  `json:"currentTime,omitempty"`
 	Paused      bool     `json:"paused,omitempty"`
 	Rate        float64  `json:"rate,omitempty"`

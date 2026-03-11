@@ -32,6 +32,7 @@ type hub struct {
 	clients         map[string]*client
 	rooms           []string
 	roomDesiredPlay map[string]bool
+	roomLastSync    map[string]*protocol.Message
 }
 
 func newHub(rooms []string) *hub {
@@ -39,6 +40,7 @@ func newHub(rooms []string) *hub {
 		clients:         make(map[string]*client),
 		rooms:           rooms,
 		roomDesiredPlay: make(map[string]bool),
+		roomLastSync:    make(map[string]*protocol.Message),
 	}
 }
 
@@ -152,6 +154,26 @@ func (h *hub) setRoomDesiredPlaying(room string, playing bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.roomDesiredPlay[room] = playing
+}
+
+func (h *hub) setRoomLastSync(room string, msg protocol.Message) {
+	if room == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cp := msg
+	h.roomLastSync[room] = &cp
+}
+
+func (h *hub) getRoomLastSync(room string) *protocol.Message {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if msg, ok := h.roomLastSync[room]; ok {
+		cp := *msg
+		return &cp
+	}
+	return nil
 }
 
 func sendMessage(c *client, msg protocol.Message) error {
@@ -295,6 +317,9 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 			joinedRoom := h.getClientRoom(c.id)
 			log.Printf("client %s joined %s", c.id, joinedRoom)
 			_ = sendMessage(c, protocol.Message{Type: protocol.TypeJoined, Room: joinedRoom, Rooms: h.roomList(), At: time.Now().UnixMilli()})
+			if lastSync := h.getRoomLastSync(joinedRoom); lastSync != nil {
+				_ = sendMessage(c, *lastSync)
+			}
 
 		case protocol.TypeLeave:
 			h.changeRoom(c.id, "")
@@ -313,6 +338,7 @@ func handleWS(h *hub, upgrader *websocket.Upgrader, w http.ResponseWriter, r *ht
 				msg.At = time.Now().UnixMilli()
 			}
 			log.Printf("sync_state from %s (%s), room=%s, t=%.3f, paused=%t", c.id, c.name, msg.Room, msg.CurrentTime, msg.Paused)
+			h.setRoomLastSync(room, msg)
 			h.broadcastExcludeInRoom(c.id, room, msg)
 
 		default:
