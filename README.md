@@ -167,3 +167,28 @@ window.synctool.setName('user-a')
 - 直接安装链接：`https://<你的用户名>.github.io/<仓库名>/sync.user.js`
 
 在安装页点击“一键安装 sync.user.js”即可像油叉那样直接安装。
+
+## GitHub Tag Release
+
+仓库已提供发布工作流：`.github/workflows/release.yml`
+
+作用：
+
+- 当你 push 一个 tag（例如 `v0.0.5`）时，自动执行多平台构建。
+- 自动创建 GitHub Release，并上传 `bin/` 下的所有服务端产物。
+- 自动生成一个发布版油猴脚本资源：`synctool-<tag>.user.js`。
+- 发布版油猴脚本的 `@version` 会从 tag 推导：
+  - `v0.0.5` -> `0.0.5`
+  - `0.0.5` -> `0.0.5`
+
+示例：
+
+```bash
+git tag v0.0.5
+git push origin v0.0.5
+```
+
+Release 完成后，你可以在 GitHub Release 页面下载：
+
+- 多平台 `synctool-server-*` 二进制
+- 对应版本的 `synctool-<tag>.user.js`
