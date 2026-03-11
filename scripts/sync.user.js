@@ -208,7 +208,6 @@
       const itemId = extractItemIdFromPlaybackRequest(url);
       if (itemId) {
         rememberItemId(itemId);
-        log('remembered itemId from ' + source + ':', itemId, url);
       }
     };
 
@@ -351,7 +350,6 @@
 
       const localItemId = rememberItemIdFromPageContext();
       if (localItemId) {
-        log('remembered itemId from page context before play:', localItemId);
         return;
       }
 
@@ -361,15 +359,11 @@
         || extractItemIdFromValue(target.dataset && target.dataset.itemid);
       if (targetItemId) {
         rememberItemId(targetItemId);
-        log('remembered itemId from play button:', targetItemId);
       }
     }, true);
 
     window.addEventListener('hashchange', () => {
-      const itemId = rememberItemIdFromPageContext();
-      if (itemId) {
-        log('remembered itemId from hash change:', itemId);
-      }
+      rememberItemIdFromPageContext();
     }, true);
   }
 
@@ -553,7 +547,6 @@
       itemId,
       at: nowMs(),
     });
-    log('sending sync_state', { action: action || 'sync', itemId, room: state.currentRoom, currentTime: v.currentTime, paused: v.paused });
     if (!itemId) {
       log('sync_state sent without itemId');
     }
@@ -676,7 +669,6 @@
     }
 
     if (msg.type === 'sync_state') {
-      log('received sync_state', { from: msg.from, itemId: msg.itemId || '', room: msg.room, currentTime: msg.currentTime, paused: msg.paused });
       if (!sameRoom(msg)) {
         return;
       }
@@ -871,13 +863,11 @@
         v.addEventListener('pause', () => maybeSend(true, 'pause', 'remote_pause'));
         v.addEventListener('play', () => maybeSend(true, 'play', 'remote_play'));
         v.addEventListener('ratechange', () => maybeSend(true, 'ratechange', 'remote_ratechange'));
-        log('video hooks installed');
       }
 
       // Apply pending sync from room join (wait until correct Emby item is loaded)
       if (state.pendingSync) {
         if (nowMs() > state.pendingSyncExpiry) {
-          log('pending sync expired');
           state.pendingSync = null;
         } else {
           const currentItemId = getEmbyItemId();
@@ -908,7 +898,6 @@
         // Enter buffering state
         isBuffering = true;
         bufferingStartedAt = now;
-        log('buffering detected');
       } else if (!progressStalled && isBuffering) {
         // Exit buffering state: progress resumed
         const bufferingDuration = now - bufferingStartedAt;

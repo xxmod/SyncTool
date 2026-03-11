@@ -1,9 +1,10 @@
 # SyncTool (Go)
 
-一个服务端 + 油猴脚本（Bilibili/Emby）的视频同步工具：
+一个服务端 + Emby 油猴脚本的视频同步工具：
 
 - 网页端通过 WebSocket 连接服务端（`ws://` 或 `wss://`）
 - 通过房间隔离同步 `currentTime/paused/playbackRate`
+- 新加入房间的用户可自动跳转到房间当前正在播放的视频并继续同步
 - 支持手动同步快捷键与播放行为自动同步
 
 > 网络层使用 HTTP WebSocket，支持通过反向代理接入 HTTPS（即油猴脚本使用 `wss://`）。
@@ -12,7 +13,7 @@
 
 - `cmd/server/main.go`：服务端
 - `internal/protocol/protocol.go`：消息协议
-- `scripts/sync.user.js`：Bilibili/Emby 油猴同步脚本
+- `scripts/sync.user.js`：Emby 油猴同步脚本
 
 ## 运行环境
 
@@ -78,37 +79,43 @@ Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
 go run .\build.go
 ```
 
-## 测试方式
-
-1. 启动 1 个服务端。
-2. 在 2 个浏览器页面安装并连接油猴脚本到同一房间。
-3. 在任意一端触发播放/暂停/拖动或按 `Ctrl+Shift+S`。
-4. 观察另一端状态与进度同步。
-
 ## 注意事项
 
 - 同步是房间级别的，跨房间互不影响。
 - 建议通过反向代理暴露 `wss://`，避免浏览器混合内容限制。
 
-## 油猴脚本（Bilibili / Emby）
+## 油猴脚本（Emby）
 
 已提供脚本：`scripts/sync.user.js`
 
 用途：
 
-- 在浏览器内读取 `<video>` 的 `currentTime/paused/playbackRate`
+- 在 Emby 页面内读取 `<video>` 的 `currentTime/paused/playbackRate`
 - 通过 WebSocket 上报到本项目服务端
-- 其他用户自动跳转到该进度并同步播放/暂停状态
+- 其他用户加入同一房间后可自动跳转到相同视频，并同步进度/播放状态
 
 安装：
 
+  （1）直接新建脚本
+
 1. 安装 Tampermonkey。
 2. 新建脚本并粘贴 `scripts/sync.user.js` 内容。
-3. 打开 B 站或 Emby 播放页，右上角会出现控制窗口：
+
+  （2）用action构建网页一键安装
+
+   1.本项目提供workflow，但直接执行会失败。
+
+   2.需要到项目settings->Github Pages->来源设置为Github Actions再重跑一次workflow
+
+
+
+亦可直接进入[Sync油猴脚本](https://xxmod.github.io/SyncTool/)处安装
+
 
 - 可填写服务器地址并重连
 - 可拉取房间列表
 - 可选择房间并 `Join/Leave`
+- 可勾选 `不跳转视频`，禁用自动切换到房间当前视频
 - 可手动 `Hide` 窗口（全屏时自动隐藏）
 
 4. 也可以在控制台配置：
@@ -125,16 +132,18 @@ window.synctool.setName('user-a')
 
 - 主控按键：`Ctrl+Shift+S` 发送当前进度状态
 - 也支持本地 `seek/pause/play/ratechange` 自动广播
+- 当房间内已有用户正在播放视频时，新加入者会自动切换到对应 Emby 条目并开始同步
 
 协议新增：
 
 - `type: "sync_state"`
-- 主要字段：`room/currentTime/paused/rate/url/from/at`
+- 主要字段：`room/currentTime/paused/rate/url/itemId/from/at`
 
 说明：
 
 - 服务端会将 `sync_state` 广播给其他在线客户端。
 - 房间内同步，跨房间互不影响。
+- 服务端会缓存每个房间最近一次 `sync_state`，用于新加入用户的自动对齐。
 - 支持 `list_rooms` / `join_room` / `leave_room`，可自由进出房间。
 
 ## GitHub 一键安装油猴脚本
