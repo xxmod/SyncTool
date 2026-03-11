@@ -42,8 +42,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp scripts/sync.user.js "dist/synctool-${{ steps.version.outputs.tag }}.user.js"
-          sed -i -E "s#^// @version[[:space:]]+.*$#// @version      ${{ steps.version.outputs.version }}#" "dist/synctool-${{ steps.version.outputs.tag }}.user.js"
+          output="dist/synctool-${{ steps.version.outputs.tag }}.user.js"
+          version='${{ steps.version.outputs.version }}'
+          cp scripts/sync.user.js "$output"
+          awk -v version="$version" '{
+            if ($0 ~ /^\/\/ @version[[:space:]]+/) {
+              print "// @version      " version
+              next
+            }
+            print
+          }' "$output" > "$output.tmp"
+          mv "$output.tmp" "$output"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
