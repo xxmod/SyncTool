@@ -5,6 +5,7 @@ on:
     branches: ["main", "master"]
     paths:
       - "scripts/sync.user.js"
+      - "scripts/syncp.user.js"
       - ".github/workflows/userscript-pages.yml"
       - "pages/**"
   workflow_dispatch:
@@ -33,6 +34,7 @@ jobs:
           set -eu
           mkdir -p dist
           cp scripts/sync.user.js dist/sync.user.js
+          cp scripts/syncp.user.js dist/syncp.user.js
           cp pages/index.html dist/index.html
 
       - name: Configure Pages
