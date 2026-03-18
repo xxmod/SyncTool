@@ -2,6 +2,8 @@
 // @name         Emby 视频同步（房间面板）
 // @namespace    synctool
 // @version      0.0.2
+// @updateURL    https://xxmod.github.io/SyncTool/sync.user.js
+// @downloadURL  https://xxmod.github.io/SyncTool/sync.user.js
 // @description  在 Emby 中按房间同步视频进度与播放状态。
 // @author       xxmod
 // @match        https://*/web/index.html*
